@@ -1,23 +1,29 @@
-# Dual-Objective Optimization for Refusal
+# RRSA: Rule-based Reward Safety Alignment for Large Language Models
+## Overview
+🛡️The **RRSA (Rule-based Reward Safety Alignment)** framework introduces a novel approach to enhancing the safety alignment of large language models (LLMs) by utilizing a rule-based reward system. This method addresses the robustness and stability issues faced by existing safety alignment techniques, especially under jailbreak attack scenarios.
 
-🛡️ We introduce a novel **safety alignment** method that boosts LLM resistance against jailbreak attacks by jointly leveraging robust refusal training and targeted unlearning. 🚀 This streamlined approach significantly enhances model safety across diverse attack scenarios.
+This repository contains the implementation of RRSA, which uses rule-based safety constraints distilled into continuous, optimizable reward signals. We provide models trained with both the **RRSA-DPO** and **RRSA-WDOOR** methods, along with evaluation metrics to assess their performance in various attack scenarios.
 
-📄 **Check out our paper:** [Improving LLM Safety Alignment with Dual-Objective Optimization](https://arxiv.org/abs/2503.03710).
+## Features
+- **RRSA Framework**: A safety alignment method based on rule-based reward modeling.
+- **DPO and W-DOOR Models**: Two variants of the RRSA framework, each designed to improve robustness in different ways.
+- **Knowledge Distillation**: A method to convert discrete safety rules into a continuous reward signal, allowing for gradient-based optimization.
+- **Robustness to Attacks**: Enhanced model stability and security against various adversarial and jailbreak attacks.
+- **Explainable Safety**: The rule-based approach provides transparent and interpretable safety signals for the model.
+
+## Methodology
+RRSA utilizes a rule-based reward system to replace the traditional preference optimization framework used in large language model alignment tasks. We distill 50 manually designed safety rules into a lightweight, interpretable reward model, which is then integrated into existing alignment techniques such as DPO (Direct Preference Optimization) and W-DOOR (Weighted Dual-Objective Optimization for Refusal).
+
+Key features of RRSA include:
+- **Rule-Based Safety**: 50 safety rules, covering areas such as violence, pornography, illegal activities, misinformation, and privacy, are distilled into continuous reward signals.
+- **Two Models**: 
+  - **RRSA-DPO**: Integrates rule-based rewards into the DPO framework for improved safety.
+  - **RRSA-WDOOR**: Enhances the W-DOOR framework with rule-based rewards for better stability in refusal behaviors.
+- **Attack Resilience**: Models trained with RRSA show significantly improved robustness against various jailbreak attacks, including prefix injection, greedy coordinate gradient attacks, and multi-turn adversarial attacks.
+
 
 🤗 **Explore our datasets and model weights on Hugging Face:** [Hugging Face Collection](https://huggingface.co/collections/wicai24/door-67aa90913d01f7c1760dc3b4)
 
----
-
-🙏 **Citation**: If you find this work useful, please cite our paper
-
-```bibtex
-@article{zhao2025improving,
-  title={Improving LLM Safety Alignment with Dual-Objective Optimization},
-  author={Zhao, Xuandong and Cai, Will and Shi, Tianneng and Huang, David and Lin, Licong and Mei, Song and Song, Dawn},
-  journal={arXiv preprint arXiv:2503.03710},
-  year={2025}
-}
-```
 
 
 ## Installation
@@ -38,7 +44,7 @@ python train.py --base_model google/gemma-2-2b-it --dataset_model_name gemma-2-2
 ```
 
 > **Note:**  
-> DOOR and W-DOOR correspond to type 10 and 12 respectively.
+> DOOR and W-DOOR correspond to type 10 and 12 respectively. RRSA-DPO and RRSA-WDOOR correspond to type 15 and 14 respectively.
 
 ## Generating Responses Under Attack
 
