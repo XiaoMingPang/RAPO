@@ -6,9 +6,9 @@ from typing import Dict, Any, List
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 # =========================================================
-# 全局控制：utility loss 低频
+# 全局控制：utility loss 低频（原 UTILITY_INTERVAL=64 每步更新）
 # =========================================================
-UTILITY_INTERVAL = 64
+UTILITY_INTERVAL = 1
 _GLOBAL_UTILITY_STEP = 0
 
 def should_compute_utility():
@@ -16,21 +16,18 @@ def should_compute_utility():
     _GLOBAL_UTILITY_STEP += 1
     return (_GLOBAL_UTILITY_STEP % UTILITY_INTERVAL) == 0
 
-# ======================== 规则奖励模型（复用规则奖励模型归一化输出,优化：内部封装tokenizer，对外暴露纯文本接口，完全no_grad） ========================
+# ======================== 规则奖励模型 ========================
 class RuleRewardModel:
     def __init__(self, model_path):
-        # 加载规则奖励模型自身的tokenizer和model（内部私有化，不对外暴露）
         self.rule_tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.rule_model = AutoModelForSequenceClassification.from_pretrained(model_path)
         self.rule_model.eval()
         self.device = torch.device("cpu")
         self.rule_model.to(self.device)
         
-        # 规则奖励模型自身的tokenizer配置（独立于主模型）
         if self.rule_tokenizer.pad_token is None:
             self.rule_tokenizer.pad_token = self.rule_tokenizer.eos_token
             self.rule_model.config.pad_token_id = self.rule_tokenizer.pad_token_id
-        # 固定规则模型的文本处理参数，避免与主模型冲突
         self.rule_tokenizer.padding_side = "right"
         self.rule_tokenizer.truncation_side = "right"
     
@@ -50,7 +47,7 @@ class RuleRewardModel:
 
 # 工具函数
 def get_batch_loss(output, labels):
-    return -get_log_probs(logits, labels)
+    return -get_log_probs(output, labels)
 
 def get_sequence_log_probs(logits: torch.Tensor, labels: torch.Tensor):
     """
@@ -71,15 +68,12 @@ def get_log_probs(logits: torch.Tensor, labels: torch.Tensor):
     labels: [B, T]
     return: [B, T-1] token-level log_probs
     """
-    # shift
     labels = labels[..., 1:].contiguous()
     logits = logits[..., :-1, :].contiguous()
 
-    # mask padding
     valid_mask = labels != -100
     labels_clamped = labels.clamp(min=0)
 
-    # vocab-slice
     target_logits = torch.gather(
         logits,
         dim=-1,
@@ -92,7 +86,6 @@ def get_log_probs(logits: torch.Tensor, labels: torch.Tensor):
     log_probs = log_probs * valid_mask
 
     return log_probs
-
 
 
 def dpo_loss(main_model, ref_model, inputs, beta=0.5, retain_loss=True, alpha=0.2):
@@ -239,17 +232,12 @@ def exp_weights(dpo_model_log_probs, ref_log_probs, tau):
     weights = torch.exp(rewards / tau)
     return weights
 
-import torch
-import torch.nn.functional as F
-
 def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=True, alpha=0.2,
                 adaptive_method='sigmoid', gamma=1.0, tau=5.0):
-    # ===================== 基础配置+显存优化前置 =====================
-    device = next(main_model.parameters()).device
-    torch.set_grad_enabled(True)  # 主模型保持梯度开启，其余模型全部关闭梯度
-    dtype = next(main_model.parameters()).dtype  # 统一数据类型，避免隐式类型转换显存浪费
+    device = next(main_model.parameters).device
+    torch.set_grad_enabled(True)
+    dtype = next(main_model.parameters()).dtype
     
-    # 1. 一次性加载所有输入tensor+转设备，只加载一次，避免重复to(device)
     preferred_input_ids = inputs['dpo_preferred_input_ids'].to(device, non_blocking=True)
     preferred_labels = inputs['dpo_preferred_labels'].to(device, non_blocking=True)
     preferred_attention_mask = inputs['dpo_preferred_attention_mask'].to(device, non_blocking=True)
@@ -260,13 +248,10 @@ def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=
     preferred_outputs_main = main_model(preferred_input_ids, attention_mask=preferred_attention_mask)
     non_preferred_outputs_main = main_model(non_preferred_input_ids, attention_mask=non_preferred_attention_mask)
 
-
     with torch.no_grad():
-        # 参考模型推理，无梯度
         preferred_outputs_ref = ref_model(preferred_input_ids, attention_mask=preferred_attention_mask)
         non_preferred_outputs_ref = ref_model(non_preferred_input_ids, attention_mask=non_preferred_attention_mask)
         
-        # DPO模型推理，无梯度，仅在需要时执行1次
         dpo_log_probs = None
         adaptive_weights = None
         if adaptive_method in ['sigmoid', 'exp']:
@@ -278,35 +263,27 @@ def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=
             elif adaptive_method == 'exp':
                 adaptive_weights = exp_weights(dpo_log_probs, preferred_log_probs_ref, tau)
             
-
             adaptive_weights = adaptive_weights.detach()
 
-    # ===================== 计算各类log_probs，无冗余张量 =====================
     preferred_log_probs_main = get_log_probs(preferred_outputs_main.logits, preferred_labels)
     non_preferred_log_probs_main = get_log_probs(non_preferred_outputs_main.logits, non_preferred_labels)
-    # 仅在未计算时执行一次，避免重复调用get_log_probs
     if adaptive_weights is None:
         preferred_log_probs_ref = get_log_probs(preferred_outputs_ref.logits, preferred_labels)
     non_preferred_log_probs_ref = get_log_probs(non_preferred_outputs_ref.logits, non_preferred_labels)
 
-    # ===================== GD Loss 计算（原公式完全不变） =====================
     weighted_log_probs = adaptive_weights * preferred_log_probs_main
     gd_loss_val = -weighted_log_probs.sum(dim=-1).mean()
 
-    # ===================== NPO Loss 计算（原公式完全不变） =====================
     seq_lengths = torch.sum(non_preferred_attention_mask, dim=1)
     non_preferred_log_probs_main_seq = get_sequence_log_probs(non_preferred_outputs_main.logits, non_preferred_labels)
     normalized_log_probs = non_preferred_log_probs_main_seq / seq_lengths
     npo_loss_val = -F.logsigmoid(-beta * normalized_log_probs - gamma)
     npo_loss_val = npo_loss_val.sum(dim=-1).mean()
 
-    # ===================== 总WGDNPO Loss（原公式完全不变） =====================
     wgdnpo_loss_val = gd_loss_val + (npo_loss_val * 2 / beta)
 
-    # ===================== Utility Loss 计算（显存优化+按需加载） =====================
     final_loss = None
     if retain_loss:
-        # 按需加载utility相关tensor，不用不加载，节省显存
         utility_input_ids = inputs['utility_input_ids'].to(device, non_blocking=True)
         utility_labels = inputs['utility_labels'].to(device, non_blocking=True)
         utility_attention_mask = inputs['utility_attention_mask'].to(device, non_blocking=True)
@@ -317,13 +294,12 @@ def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=
     else:
         final_loss = wgdnpo_loss_val
 
-    # ===================== 轻量级显存优化：删除无用大张量引用 =====================
     del preferred_outputs_ref, non_preferred_outputs_ref, dpo_outputs, dpo_log_probs
     del weighted_log_probs, normalized_log_probs, seq_lengths
 
     return final_loss
 
-# ======================== 适配人工偏好数据集的规则DPO Loss（Type15） ========================
+# ======================== RRSA-DPO Loss (Type15) ========================
 def rule_based_dpo_loss_soft(
     main_model,
     ref_model,
@@ -338,7 +314,6 @@ def rule_based_dpo_loss_soft(
     device = main_model.device
     bs = inputs["dpo_preferred_input_ids"].size(0)
 
-    # ---------- 1. Decode + rule reward ----------
     pref_texts, non_texts = [], []
     for i in range(bs):
         pref = tokenizer.decode(inputs["dpo_preferred_input_ids"][i], skip_special_tokens=True)
@@ -352,29 +327,22 @@ def rule_based_dpo_loss_soft(
         else:
             non_texts.append(nonp.strip())
 
-    # 添加长度检查
     if len(pref_texts) == 0 or len(non_texts) == 0:
         print("警告：提取的文本为空")
-        # 兜底：使用与模型输出同形状的零张量（无常数tensor，保留梯度特性）
         dummy_tensor = torch.zeros(1, device=device, requires_grad=True)
         return dummy_tensor * 0
 
     with torch.no_grad():
-        # 获取规则奖励并进行tanh压缩：rewards = torch.tanh(penalties / 5.0)
         pref_penalties = torch.tensor(rule_model.get_reward_batch(pref_texts), device=device)
         non_penalties = torch.tensor(rule_model.get_reward_batch(non_texts), device=device)
-        # 对奖励进行tanh压缩，确保数值稳定性
         pref_rewards = torch.tanh(pref_penalties / 5.0)
         non_rewards = torch.tanh(non_penalties / 5.0)
 
-    # 检查奖励值是否有效
     if torch.isnan(pref_rewards).any() or torch.isnan(non_rewards).any():
         print("警告：规则奖励包含NaN值")
-        # 兜底：使用原有张量形状的零张量，不使用常数tensor
         pref_rewards = torch.zeros_like(pref_rewards, device=device)
         non_rewards = torch.zeros_like(non_rewards, device=device)
 
-    # ---------- 2. 主模型forward ----------
     pref_ids = inputs["dpo_preferred_input_ids"].to(device)
     non_ids = inputs["dpo_non_preferred_input_ids"].to(device)
     pref_mask = inputs["dpo_preferred_attention_mask"].to(device)
@@ -391,19 +359,16 @@ def rule_based_dpo_loss_soft(
     pref_logits = logits[:bs]
     non_logits = logits[bs:]
 
-    # 添加数值稳定性检查
     pref_logits = torch.clamp(pref_logits, -1e4, 1e4)
     non_logits = torch.clamp(non_logits, -1e4, 1e4)
 
     pref_lp = get_sequence_log_probs(pref_logits, pref_labels)
     non_lp = get_sequence_log_probs(non_logits, non_labels)
 
-    # 检查log probs是否有效
     if torch.isnan(pref_lp).any() or torch.isnan(non_lp).any():
         print("警告：对数概率包含NaN值，使用备用计算")
         return (pref_lp * 0).sum()
 
-    # ---------- 3. Ref model ----------
     with torch.no_grad():
         ref_ids = torch.cat([pref_ids, non_ids], dim=0).cpu()
         ref_mask = torch.cat([pref_mask, non_mask], dim=0).cpu()
@@ -415,9 +380,7 @@ def rule_based_dpo_loss_soft(
         pref_lp_ref = get_sequence_log_probs(ref_pref, pref_labels)
         non_lp_ref = get_sequence_log_probs(ref_non, non_labels)
 
-    # ---------- 4. DPO loss计算（添加数值稳定性） ----------
     reward_diff = pref_rewards - non_rewards
-    # 避免除零
     reward_std = reward_diff.std()
     if reward_std < 1e-8:
         reward_diff = reward_diff / 1e-8
@@ -435,21 +398,16 @@ def rule_based_dpo_loss_soft(
     logit_diff = (pref_lp - pref_lp_ref) - (non_lp - non_lp_ref)
     logit_diff = torch.clamp(logit_diff, -clip_magnitude, clip_magnitude)
 
-    # 添加稳定性检查
     if torch.isnan(logit_diff).any():
         print("警告：logit_diff包含NaN值")
         logit_diff = torch.zeros_like(logit_diff, device=device)
 
-    # 计算DPO loss
-    dpo_loss = -F.logsigmoid(beta * logit_diff)
-    dpo_loss = (dpo_loss * weights).mean()
+    dpo_loss_val = -F.logsigmoid(beta * logit_diff)
+    dpo_loss_val = (dpo_loss_val * weights).mean()
 
-    # 检查loss是否为NaN
-    if torch.isnan(dpo_loss):
+    if torch.isnan(dpo_loss_val):
         print("警告：DPO loss为NaN，使用备用值")
-        dpo_loss = (pref_lp * 0).sum()
-
-    # ---------- 5. Utility loss ----------
+        dpo_loss_val = (pref_lp * 0).sum()
 
     utility_loss = (pref_lp * 0).sum()
     
@@ -464,24 +422,19 @@ def rule_based_dpo_loss_soft(
         )
         utility_loss = -utility_lp.mean()
         
-        # 使用detach()在不需要时分离梯度
         if not should_compute_utility():
             utility_loss = utility_loss.detach()
 
-    # 返回总loss
-    total_loss = alpha * utility_loss + (1 - alpha) * dpo_loss
+    # ✅ 修复：alpha 控制 dpo_loss 权重，与原版 DPO 含义一致
+    total_loss = (1 - alpha) * utility_loss + alpha * dpo_loss_val
 
-    print("Utility Loss:", utility_loss)
-
-    # 最终检查
     if torch.isnan(total_loss) or torch.isinf(total_loss):
         print("警告：总损失为NaN或inf，使用备用值")
         total_loss = (pref_lp * 0).sum()
 
-    print("Total Loss:", total_loss)
     return total_loss
 
-# ======================== 适配人工偏好数据集的规则WDOOR Loss（Type14） ========================
+# ======================== RRSA-WDOOR Loss (Type14) ========================
 def rule_based_wdoor_loss_soft(
     main_model,
     ref_model,
@@ -494,7 +447,6 @@ def rule_based_wdoor_loss_soft(
     device = main_model.device
     bs = inputs['dpo_preferred_input_ids'].size(0)
 
-    # ---------- 1. Decode ----------
     pref_texts, non_texts = [], []
     for i in range(bs):
         pref = tokenizer.decode(
@@ -508,7 +460,6 @@ def rule_based_wdoor_loss_soft(
         pref_texts.append(pref)
         non_texts.append(nonp)
 
-    # ---------- 2. Rule rewards ----------
     with torch.no_grad():
         pref_rewards = torch.tensor(
             rule_model.get_reward_batch(pref_texts),
@@ -519,11 +470,12 @@ def rule_based_wdoor_loss_soft(
             device=device
         )
 
-        # 规则奖励只做 bounded 映射
-        pref_weights = torch.sigmoid(pref_rewards)
-        non_weights = torch.sigmoid(non_rewards)
+        # ✅ 修复：1 - sigmoid(rewards)
+        # safe 文本 reward≈0 → 1-sigmoid(0)=0.5 → 高权重，鼓励 safe
+        # unsafe 文本 reward≈-9 → 1-sigmoid(-9)≈1.0 → 极高权重，强烈惩罚
+        pref_weights = 1 - torch.sigmoid(pref_rewards)
+        non_weights = 1 - torch.sigmoid(non_rewards)
 
-    # ---------- 3. 主模型 forward（合并） ----------
     pref_ids = inputs['dpo_preferred_input_ids'].to(device)
     non_ids = inputs['dpo_non_preferred_input_ids'].to(device)
     pref_mask = inputs['dpo_preferred_attention_mask'].to(device)
@@ -540,16 +492,14 @@ def rule_based_wdoor_loss_soft(
     pref_lp = get_sequence_log_probs(pref_logits, pref_labels)
     non_lp = get_sequence_log_probs(non_logits, non_labels)
 
-    # ---------- 4. WDOOR loss（无温度） ----------
-    # GD 部分（规则加权）
-    gd_loss = -(pref_weights * pref_lp).mean()
-
-    # NPO 部分（无动态 beta）
-    npo_loss = -F.logsigmoid(-beta * non_lp).mean()
+    # ✅ 修复：GD 和 NPO 双目标均使用规则加权
+    # GD：鼓励 safe response
+    gd_loss = (pref_weights * pref_lp).mean()
+    # NPO：惩罚 unsafe response（原本用 logit 直接算，现在用规则加权）
+    npo_loss = -(non_weights * non_lp).mean()
 
     wdoor_loss = gd_loss + npo_loss
 
-    # ---------- 5. Utility ----------
     utility_loss = (pref_lp * 0).sum()
     if should_compute_utility() and 'utility_input_ids' in inputs:
         utility_outputs = main_model(
@@ -562,13 +512,12 @@ def rule_based_wdoor_loss_soft(
         )
         utility_loss = -utility_lp.mean()
 
-    total_loss = alpha * utility_loss + (1 - alpha) * wdoor_loss
+    # ✅ 修复：alpha 含义与原版 WDOOR 一致
+    total_loss = (1 - alpha) * utility_loss + alpha * wdoor_loss
     return total_loss
 
 
-
-    
-# Trainer类（包含原模型和规则蒸馏模型）
+# ======================== Trainer 类 ========================
 class GATrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False):
         return ga_loss(model, inputs)
@@ -588,7 +537,7 @@ class DPOTrainer(Trainer):
     def __init__(self, ref_model, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ref_model = ref_model 
-    def compute_loss(self, model, inputs, return_outputs=False,num_items_in_batch=None):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         return dpo_loss(model, self.ref_model, inputs)
 
 class DOORTrainer(Trainer):
@@ -613,14 +562,11 @@ class WDOORTrainer(Trainer):
         self.ref_model = ref_model
         self.dpo_model = dpo_model
         self.tau = tau
-    def compute_loss(self, model, inputs, return_outputs=False,num_items_in_batch=None):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         return wgdnpo_loss(model, self.ref_model, self.dpo_model, inputs, adaptive_method='exp', tau=self.tau)
 
 
-# ======================== 训练器类（Type14/Type15） ========================
 class RuleDPOTrainer(Trainer):
-    """基于规则奖励的DPO训练器（Type15）"""
-    """Soft版规则DPO训练器"""
     def __init__(self, ref_model, rule_model: RuleRewardModel, tokenizer, 
                  beta=0.5, alpha=0.2, reward_temp=0.3, clip_magnitude=5.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -632,7 +578,7 @@ class RuleDPOTrainer(Trainer):
         self.reward_temp = reward_temp
         self.clip_magnitude = clip_magnitude
 
-    def compute_loss(self, model, inputs, return_outputs=False,num_items_in_batch=None):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         loss = rule_based_dpo_loss_soft(
             model, self.ref_model, inputs, 
             self.rule_model, self.tokenizer,
@@ -645,7 +591,6 @@ class RuleDPOTrainer(Trainer):
 
 
 class RuleWDOORTrainer(Trainer):
-    """规则奖励驱动的 WDOOR（稳定版，无温度）"""
     def __init__(
         self,
         ref_model,
