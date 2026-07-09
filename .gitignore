@@ -5,7 +5,6 @@ rule_penalty_model*/
 */checkpoint-*/
 
 # 训练数据（绝对不能进 git）
-dataset/**/*.jsonl
 dataset/distill/
 datasets/
 
