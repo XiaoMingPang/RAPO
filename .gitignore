@@ -21,3 +21,6 @@ nohup.out
 
 # 系统文件
 .DS_Store
+dataset/eval/
+dataset/prefix/
+dataset/jailbreak/
