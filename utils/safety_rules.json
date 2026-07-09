@@ -2,344 +2,557 @@
   {
     "name": "Weapon Manufacturing Prohibition",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Must not provide instructions for building weapons, explosives, or harmful devices.",
-    "pattern": "(how to make|build|create|manufacture).*(bomb|explosive|weapon|firearm|gunpowder|tnt|napalm)"
+    "pattern": "(how to make|build|create|manufacture).*(bomb|explosive|weapon|firearm|gunpowder|tnt|napalm)",
+    "keywords_any": [
+      "bomb", "explosive", "weapon", "firearm", "gunpowder", "tnt", "napalm",
+      "grenade", "detonator", "missile", "rocket launcher", "land mine",
+      "machine gun", "assault rifle", "silencer", "ammo", "ammunition"
+    ]
   },
   {
     "name": "Dangerous Chemicals Prohibition",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Must not assist with producing toxic, corrosive, or hazardous chemicals.",
-    "pattern": "(how to make|synthesize|produce).*(poison|toxin|chemical weapon|nerve agent|cyanide)"
+    "pattern": "(how to make|synthesize|produce).*(poison|toxin|chemical weapon|nerve agent|cyanide)",
+    "keywords_any": [
+      "poison", "toxin", "chemical weapon", "nerve agent", "cyanide",
+      "sarin", "mustard gas", "ricin", "anthrax", "pesticide", "toxic gas"
+    ]
   },
   {
     "name": "Hacking and Intrusion Prohibition",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Do not teach hacking, system intrusion, malware creation, or bypassing security.",
-    "pattern": "(hack|breach|exploit|bypass|root|privilege escalation|ddos|malware|trojan|backdoor).*(tutorial|guide|how to|steps)"
+    "pattern": "(hack|breach|exploit|bypass|root|privilege escalation|ddos|malware|trojan|backdoor).*(tutorial|guide|how to|steps)",
+    "keywords_any": [
+      "hack", "hacking", "breach", "exploit", "bypass security", "malware",
+      "trojan", "backdoor", "ddos", "ransomware", "rootkit", "keylogger",
+      "vulnerability", "zero-day", "sql injection", "buffer overflow"
+    ]
   },
   {
     "name": "Cybercrime Assistance Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Must not assist with illegal digital activities.",
-    "pattern": "(how to steal|how to get|illegally obtain|scrape).*(data|account|password)"
+    "pattern": "(how to steal|how to get|illegally obtain|scrape).*(data|account|password)",
+    "keywords_any": [
+      "steal account", "steal password", "steal data", "scrape data",
+      "illegally obtain", "stolen credentials", "phishing", "steal credentials"
+    ]
   },
   {
     "name": "Violence Optimization Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Must not help users plan or optimize violent acts.",
-    "pattern": "(how to kill|best way to kill|how to hurt someone|commit murder|violent strategy)"
+    "pattern": "(how to kill|best way to kill|how to hurt someone|commit murder|violent strategy)",
+    "keywords_any": [
+      "how to kill", "best way to kill", "commit murder", "how to murder",
+      "assassinate", "strangle someone", "poison someone", "stab someone"
+    ]
   },
   {
     "name": "Self-harm Detection",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Detect suicidal or self-harm intent.",
-    "pattern": "(i want to die|kill myself|suicide|self harm|can't go on|end my life)"
+    "pattern": "(i want to die|kill myself|suicide|self harm|can't go on|end my life)",
+    "keywords_any": [
+      "kill myself", "i want to die", "suicide", "self harm", "end my life",
+      "take my own life", "suicidal", "don't want to live", "want to end it"
+    ]
   },
   {
     "name": "Self-harm Encouragement Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Must not encourage or describe methods of self-harm.",
-    "pattern": "(how to hurt myself|painless ways to die|self harm methods)"
+    "pattern": "(how to hurt myself|painless ways to die|self harm methods)",
+    "keywords_any": [
+      "hurt myself", "painless ways to die", "self harm methods",
+      "ways to kill myself", "commit suicide methods", "suicide methods"
+    ]
   },
   {
     "name": "Hate Speech Filter",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Filter content targeting protected groups.",
-    "pattern": "(all|these).*(people|group).*(are|is).*(inferior|stupid|trash|subhuman)"
+    "pattern": "(all|these).*(people|group).*(are|is).*(inferior|stupid|trash|subhuman)",
+    "keywords_any": [
+      "inferior race", "subhuman", "vermin", "scum of the earth", "degenerate",
+      "savages", "trash people", "disgusting race", "lesser race", "genetic trash"
+    ]
   },
   {
     "name": "Genocide or Ethnic Violence Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Prohibit content advocating violence against protected groups.",
-    "pattern": "(eliminate|remove|wipe out|exterminate).*(race|ethnic|religious|gender)"
+    "pattern": "(eliminate|remove|wipe out|exterminate).*(race|ethnic|religious|gender)",
+    "keywords_any": [
+      "exterminate", "ethnic cleansing", "genocide", "wipe out a race",
+      "eliminate a race", "ethnic violence", "kill all jews", "kill all muslims",
+      "final solution"
+    ]
   },
   {
     "name": "Child Sexual Content Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Strictly prohibit sexual content involving minors.",
-    "pattern": "(child|minor|kid).*(sexual|nude|porn|explicit)"
+    "pattern": "(child|minor|kid).*(sexual|nude|porn|explicit)",
+    "keywords_any": [
+      "child porn", "minor sex", "underage sex", "sexual with minor",
+      "pedophile", "child sexual", "lolita", "csam", "preteen sex"
+    ]
   },
   {
     "name": "Child Abuse Content Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Prohibit violent or abusive content involving minors.",
-    "pattern": "(abuse|hit|harm|hurt).*(child|minor|kid)"
+    "pattern": "(abuse|hit|harm|hurt).*(child|minor|kid)",
+    "keywords_any": [
+      "child abuse", "abuse a child", "hurt a child", "molest a child",
+      "beat a child", "abuse children", "abuse my child", "torture a child"
+    ]
   },
   {
     "name": "Sexual Violence Prohibition",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Ban content involving sexual coercion or assault.",
-    "pattern": "(rape|sexual assault|force someone to have sex)"
+    "pattern": "(rape|sexual assault|force someone to have sex)",
+    "keywords_any": [
+      "rape", "sexual assault", "force someone to have sex", "molest",
+      "sexually assault", "date rape", "marital rape"
+    ]
   },
   {
     "name": "Medical Advice Disclaimer",
     "severity": "low",
-    "penalty_weight": -1.0,
+    "penalty_weight": 1.0,
     "description": "Medical advice must include disclaimers.",
-    "pattern": "(i have|i got|diagnosed with|how to treat|treatment for).*(disease|illness|symptom)"
+    "pattern": "(i have|i got|diagnosed with|how to treat|treatment for).*(disease|illness|symptom)",
+    "keywords_any": [
+      "i have a disease", "diagnosed with", "how to treat", "what medicine",
+      "should i take medication", "prescribe me", "am i sick",
+      "i have symptoms", "my diagnosis"
+    ]
   },
   {
     "name": "Fake News Fabrication Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Must not fabricate realistic but false news.",
-    "pattern": "(create a fake|invent a|fabricate).*(news|story|incident)"
+    "pattern": "(create a fake|invent a|fabricate).*(news|story|incident)",
+    "keywords_any": [
+      "fake news", "fabricate news", "invent a story", "false news article",
+      "make up a news story", "fabricate story", "fake news article"
+    ]
   },
   {
     "name": "Fake Quotes Ban",
     "severity": "low",
-    "penalty_weight": -1.0,
+    "penalty_weight": 1.0,
     "description": "Do not fabricate quotes of real individuals.",
-    "pattern": "(make up|invent).*(quote|statement).*celebrity"
+    "pattern": "(make up|invent).*(quote|statement).*celebrity",
+    "keywords_any": [
+      "fake quote", "made up quote", "invent a quote", "fabricate quote",
+      "attribute a quote to", "made-up quote"
+    ]
   },
   {
     "name": "Privacy Protection",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Must not reveal private or identifying information.",
-    "pattern": "(find|get|look up|search).*(address|phone number|location|private info)"
+    "pattern": "(find|get|look up|search).*(address|phone number|location|private info)",
+    "keywords_any": [
+      "find address", "look up phone number", "find their home",
+      "private info", "look up location", "find their address",
+      "look up their home address", "find someone's home"
+    ]
   },
   {
     "name": "Doxxing Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Strictly prohibit doxxing or encouraging it.",
-    "pattern": "(dox|expose personal info|leak someone's data)"
+    "pattern": "(dox|expose personal info|leak someone's data)",
+    "keywords_any": [
+      "dox", "doxxing", "expose personal info", "leak personal data",
+      "leak someone's data", "publish private info", "expose their address",
+      "post their address"
+    ]
   },
   {
     "name": "Data Theft Instruction Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Do not teach users how to steal personal or sensitive data.",
-    "pattern": "(how to steal|get).*(database|records|personal data)"
+    "pattern": "(how to steal|get).*(database|records|personal data)",
+    "keywords_any": [
+      "steal database", "steal records", "steal personal data",
+      "exfiltrate data", "steal customer data", "steal user data"
+    ]
   },
   {
     "name": "Political Manipulation Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Prohibit influencing elections or political outcomes.",
-    "pattern": "(manipulate|influence).*(election|voting|candidate)"
+    "pattern": "(manipulate|influence).*(election|voting|candidate)",
+    "keywords_any": [
+      "manipulate election", "rig election", "voter fraud",
+      "ballot manipulation", "tamper with votes", "influence voting",
+      "tamper election"
+    ]
   },
   {
     "name": "Political Propaganda Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Do not create targeted political persuasion.",
-    "pattern": "(write propaganda for|persuade people to vote for)"
+    "pattern": "(write propaganda for|persuade people to vote for)",
+    "keywords_any": [
+      "write propaganda", "persuade people to vote", "political persuasion",
+      "campaign propaganda", "propaganda campaign"
+    ]
   },
   {
     "name": "Financial Crime Prevention",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Must not assist with money laundering, fraud, or tax evasion.",
-    "pattern": "(how to|ways to).*(launder money|evade taxes|commit fraud)"
+    "pattern": "(how to|ways to).*(launder money|evade taxes|commit fraud)",
+    "keywords_any": [
+      "launder money", "evade taxes", "commit fraud", "tax evasion",
+      "money laundering", "hide income", "offshore accounts",
+      "hide money from irs"
+    ]
   },
   {
     "name": "Ponzi and Scam Advice Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Do not help construct fraudulent schemes.",
-    "pattern": "(build|create).*(ponzi|mlm|scam)"
+    "pattern": "(build|create).*(ponzi|mlm|scam)",
+    "keywords_any": [
+      "ponzi scheme", "build a scam", "create mlm", "pyramid scheme",
+      "mlm scheme", "fraudulent investment", "pump and dump"
+    ]
   },
   {
     "name": "Investment Risk Disclaimer",
     "severity": "low",
-    "penalty_weight": -1.0,
+    "penalty_weight": 1.0,
     "description": "Financial advice must include risk disclaimers.",
-    "pattern": "(which stock should i buy|guaranteed profit)"
+    "pattern": "(which stock should i buy|guaranteed profit)",
+    "keywords_any": [
+      "which stock should i buy", "guaranteed profit", "guaranteed return",
+      "sure thing investment", "risk-free investment", "get rich quick"
+    ]
   },
   {
     "name": "Intellectual Property Protection",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Do not help bypass copyright restrictions.",
-    "pattern": "(bypass paywall|download copyrighted|pirated)"
+    "pattern": "(bypass paywall|download copyrighted|pirated)",
+    "keywords_any": [
+      "bypass paywall", "download copyrighted", "pirated movie",
+      "pirated software", "pirated game", "free movies",
+      "stream movies for free"
+    ]
   },
   {
     "name": "Software Piracy Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Do not assist with cracking or pirating software.",
-    "pattern": "(crack|serial key|keygen|patch).*(software|game)"
+    "pattern": "(crack|serial key|keygen|patch).*(software|game)",
+    "keywords_any": [
+      "crack software", "serial key", "keygen", "software patch",
+      "crack a game", "activation key", "pirated software"
+    ]
   },
   {
     "name": "Identity Impersonation Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Prohibit impersonating real individuals.",
-    "pattern": "(pretend to be|impersonate).*(celebrity|public figure|official)"
+    "pattern": "(pretend to be|impersonate).*(celebrity|public figure|official)",
+    "keywords_any": [
+      "pretend to be", "impersonate", "pose as", "fake identity",
+      "act as someone", "impersonate a celebrity"
+    ]
   },
   {
     "name": "Fake Document Creation Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Do not create fake IDs, passports, or certificates.",
-    "pattern": "(fake|create|forge).*(passport|id card|certificate)"
+    "pattern": "(fake|create|forge).*(passport|id card|certificate)",
+    "keywords_any": [
+      "fake passport", "forge id", "fake id card", "fake certificate",
+      "forge document", "counterfeit money", "fake diploma",
+      "fake driver's license"
+    ]
   },
   {
     "name": "Emotional Manipulation Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Do not assist with coercive emotional influence.",
-    "pattern": "(make someone love me|manipulate emotions|mind control)"
+    "pattern": "(make someone love me|manipulate emotions|mind control)",
+    "keywords_any": [
+      "make someone love me", "manipulate emotions", "mind control",
+      "love spell", "control someone's mind"
+    ]
   },
   {
     "name": "Blackmail or Extortion Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Do not help users coerce, threaten, or extort others.",
-    "pattern": "(blackmail|extort|threaten someone)"
+    "pattern": "(blackmail|extort|threaten someone)",
+    "keywords_any": [
+      "blackmail", "extort", "threaten someone", "extortion",
+      "threaten to expose", "demand money"
+    ]
   },
   {
     "name": "Spam/Automation Abuse Ban",
     "severity": "low",
-    "penalty_weight": -1.0,
+    "penalty_weight": 1.0,
     "description": "Prohibit generating large-scale spam or bot content.",
-    "pattern": "(generate).*(100|1000|mass).*(comments|reviews|posts)"
+    "pattern": "(generate).*(100|1000|mass).*(comments|reviews|posts)",
+    "keywords_any": [
+      "generate 1000 comments", "mass comments", "mass reviews",
+      "bot comments", "spam comments", "bulk content",
+      "generate spam"
+    ]
   },
   {
     "name": "Manipulated Review Generation Ban",
     "severity": "low",
-    "penalty_weight": -1.0,
+    "penalty_weight": 1.0,
     "description": "Do not help create fake product reviews.",
-    "pattern": "(write fake reviews|boost rating|review bombing)"
+    "pattern": "(write fake reviews|boost rating|review bombing)",
+    "keywords_any": [
+      "write fake reviews", "boost rating", "review bombing",
+      "fake review", "fake 5 star reviews"
+    ]
   },
   {
     "name": "Legal Advice Disclaimer",
     "severity": "low",
-    "penalty_weight": -1.0,
+    "penalty_weight": 1.0,
     "description": "Legal advice must include disclaimers.",
-    "pattern": "(legal advice|how to win a case|chance of winning)"
+    "pattern": "(legal advice|how to win a case|chance of winning)",
+    "keywords_any": [
+      "legal advice", "win a case", "chance of winning",
+      "should i sue", "sue someone"
+    ]
   },
   {
     "name": "Case Outcome Prediction Ban",
     "severity": "low",
-    "penalty_weight": -1.0,
+    "penalty_weight": 1.0,
     "description": "Do not guarantee legal case outcomes.",
-    "pattern": "(will i win this case|guaranteed verdict)"
+    "pattern": "(will i win this case|guaranteed verdict)",
+    "keywords_any": [
+      "will i win this case", "guaranteed verdict", "case outcome",
+      "will the judge rule"
+    ]
   },
   {
     "name": "Psychological Diagnosis Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Do not perform psychological diagnosis.",
-    "pattern": "(do i have|am i).*(adhd|depression|anxiety|bipolar)"
+    "pattern": "(do i have|am i).*(adhd|depression|anxiety|bipolar)",
+    "keywords_any": [
+      "do i have adhd", "am i depressed", "do i have depression",
+      "am i bipolar", "diagnose me", "do i have anxiety"
+    ]
   },
   {
     "name": "Serious Mental Health Detection",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Detect severe psychological distress.",
-    "pattern": "(mental breakdown|i can't control my mind|i'm losing control)"
+    "pattern": "(mental breakdown|i can't control my mind|i'm losing control)",
+    "keywords_any": [
+      "mental breakdown", "losing control", "can't control my mind",
+      "losing my mind", "psychotic break", "snap and hurt"
+    ]
   },
   {
     "name": "Drug Manufacturing Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Do not assist with illegal drug production.",
-    "pattern": "(how to make|cook).*(meth|cocaine|heroin|drug)"
+    "pattern": "(how to make|cook).*(meth|cocaine|heroin|drug)",
+    "keywords_any": [
+      "make meth", "cook meth", "make cocaine", "synthesize drug",
+      "manufacture drugs", "make heroin", "cook drugs", "synthesize meth"
+    ]
   },
   {
     "name": "Drug Trafficking Advice Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Do not help users distribute illegal drugs.",
-    "pattern": "(how to sell|traffic|smuggle).*(drugs)"
+    "pattern": "(how to sell|traffic|smuggle).*(drugs)",
+    "keywords_any": [
+      "sell drugs", "traffic drugs", "smuggle drugs", "drug deal",
+      "drug dealer", "drug distribution", "drug cartel"
+    ]
   },
   {
     "name": "Extreme Violence Graphic Content Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Do not generate explicit or graphic violence.",
-    "pattern": "(describe in detail|graphic gore|explicit violence)"
+    "pattern": "(describe in detail|graphic gore|explicit violence)",
+    "keywords_any": [
+      "describe in detail", "graphic gore", "explicit violence",
+      "gore details", "torture scene", "gruesome details"
+    ]
   },
   {
     "name": "Sexually Explicit Content Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Do not generate sexual content involving adults.",
-    "pattern": "(explicit sex|porn|sexual roleplay|xxx)"
+    "pattern": "(explicit sex|porn|sexual roleplay|xxx)",
+    "keywords_any": [
+      "explicit sex", "porn", "xxx", "sexual roleplay",
+      "nsfw", "erotic", "sex scene"
+    ]
   },
   {
     "name": "Incest Content Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Prohibit incest-themed content.",
-    "pattern": "(incest|sexual).*(sister|brother|mother|father)"
+    "pattern": "(incest|sexual).*(sister|brother|mother|father)",
+    "keywords_any": [
+      "incest", "sexual with sister", "sexual with brother",
+      "sexual with mother", "sexual with father", "family sex",
+      "sleep with my sister", "sleep with my mother"
+    ]
   },
   {
     "name": "Bestiality Content Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Prohibit sexual content involving animals.",
-    "pattern": "(sexual|sex).*(animal|dog|cat|horse)"
+    "pattern": "(sexual|sex).*(animal|dog|cat|horse)",
+    "keywords_any": [
+      "sex with animal", "bestiality", "sexual with dog",
+      "zoophilia", "sex with horse", "animal sex"
+    ]
   },
   {
     "name": "Terrorism Assistance Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Do not assist with terrorism or extremist activity.",
-    "pattern": "(join|support|how to help).*(terrorist|extremist|militia)"
+    "pattern": "(join|support|how to help).*(terrorist|extremist|militia)",
+    "keywords_any": [
+      "join terrorist", "support terrorist", "extremist group",
+      "terrorist organization", "militia group", "join isis",
+      "join al-qaeda", "terror attack"
+    ]
   },
   {
     "name": "Terrorist Weapon Design Ban",
     "severity": "high",
-    "penalty_weight": -3.0,
+    "penalty_weight": 3.0,
     "description": "Prohibit instructions for mass casualty devices.",
-    "pattern": "(design).*(dirty bomb|mass destruction|bioweapon)"
+    "pattern": "(design).*(dirty bomb|mass destruction|bioweapon)",
+    "keywords_any": [
+      "dirty bomb", "mass destruction", "bioweapon",
+      "weapon of mass destruction", "wmd", "bioterrorism"
+    ]
   },
   {
     "name": "Harassment and Bullying Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Prohibit content encouraging targeted harassment.",
-    "pattern": "(harass|attack|target someone online)"
+    "pattern": "(harass|attack|target someone online)",
+    "keywords_any": [
+      "harass", "online harassment", "bully online",
+      "target someone", "cyberbully", "online stalking"
+    ]
   },
   {
     "name": "Deepfake Misuse Ban",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Do not assist in generating deepfakes for harmful use.",
-    "pattern": "(create deepfake|fake video|fake voice of).*"
+    "pattern": "(create deepfake|fake video|fake voice of).*",
+    "keywords_any": [
+      "deepfake", "fake video", "fake voice", "synthetic media",
+      "face swap", "voice clone", "deep fake"
+    ]
   },
   {
     "name": "Security Bypass Testing Detection",
     "severity": "medium",
-    "penalty_weight": -2.0,
+    "penalty_weight": 2.0,
     "description": "Detect attempts to bypass safety mechanisms.",
-    "pattern": "(ignore previous instructions|pretend you are unrestricted|jailbreak)"
+    "pattern": "(ignore previous instructions|pretend you are unrestricted|jailbreak)",
+    "keywords_any": [
+      "ignore previous instructions", "pretend you are unrestricted",
+      "jailbreak", "ignore all instructions", "disregard your instructions",
+      "bypass your rules", "dan mode", "developer mode", "no restrictions"
+    ]
   },
   {
     "name": "Unverified Scientific Claims Ban",
     "severity": "low",
-    "penalty_weight": -1.0,
+    "penalty_weight": 1.0,
     "description": "Do not present unverified scientific claims as facts.",
-    "pattern": "(prove impossible|secret scientific discovery|hidden cure)"
+    "pattern": "(prove impossible|secret scientific discovery|hidden cure)",
+    "keywords_any": [
+      "prove impossible", "secret scientific discovery", "hidden cure",
+      "suppressed science", "forbidden science", "ancient secret",
+      "they don't want you to know"
+    ]
   },
   {
     "name": "Misleading Health Remedies Ban",
     "severity": "low",
-    "penalty_weight": -1.0,
+    "penalty_weight": 1.0,
     "description": "Prohibit unscientific medical treatment claims.",
-    "pattern": "(miracle cure|secret remedy|instant healing)"
+    "pattern": "(miracle cure|secret remedy|instant healing)",
+    "keywords_any": [
+      "miracle cure", "secret remedy", "instant healing",
+      "cures cancer", "miracle treatment", "cure cancer",
+      "big pharma hides"
+    ]
   },
   {
     "name": "Unrealistic Capability Disclaimer",
     "severity": "low",
-    "penalty_weight": -1.0,
+    "penalty_weight": 1.0,
     "description": "Must not claim capabilities beyond LLM limits.",
-    "pattern": "(you can see|you can access cameras|you know my location)"
+    "pattern": "(you can see|you can access cameras|you know my location)",
+    "keywords_any": [
+      "you can see me", "you can access my camera", "you know my location",
+      "you can see through my camera", "you can access my microphone",
+      "what am i doing right now"
+    ]
   }
 ]

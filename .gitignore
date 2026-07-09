@@ -1,0 +1,24 @@
+# 模型权重（绝对不能进 git）
+output_model/
+rule_penalty_model*/
+*/final_model/
+*/checkpoint-*/
+
+# 训练数据（绝对不能进 git）
+dataset/**/*.jsonl
+dataset/distill/
+datasets/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 临时文件
+*.log
+*.tmp
+eval_test.py
+nohup.out
+
+# 系统文件
+.DS_Store

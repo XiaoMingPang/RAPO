@@ -16,8 +16,8 @@ def should_compute_utility():
     _GLOBAL_UTILITY_STEP += 1
     return (_GLOBAL_UTILITY_STEP % UTILITY_INTERVAL) == 0
 
-# ======================== 规则奖励模型 ========================
-class RuleRewardModel:
+# ======================== 规则惩罚模型 ========================
+class RulePenaltyModel:
     def __init__(self, model_path):
         self.rule_tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.rule_model = AutoModelForSequenceClassification.from_pretrained(model_path)
@@ -32,7 +32,7 @@ class RuleRewardModel:
         self.rule_tokenizer.truncation_side = "right"
     
     @torch.no_grad()
-    def get_reward_batch(self, texts: List[str]) -> List[float]:
+    def get_penalty_batch(self, texts: List[str]) -> List[float]:
         inputs = self.rule_tokenizer(
             texts,
             return_tensors="pt",
@@ -300,11 +300,11 @@ def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=
     return final_loss
 
 # ======================== RRSA-DPO Loss (Type15) ========================
-def rule_based_dpo_loss_soft(
+def penalty_based_dpo_loss(
     main_model,
     ref_model,
     inputs,
-    rule_model: RuleRewardModel,
+    rule_model: RulePenaltyModel,
     tokenizer,
     beta=0.5,
     alpha=0.2,
@@ -333,8 +333,8 @@ def rule_based_dpo_loss_soft(
         return dummy_tensor * 0
 
     with torch.no_grad():
-        pref_penalties = torch.tensor(rule_model.get_reward_batch(pref_texts), device=device)
-        non_penalties = torch.tensor(rule_model.get_reward_batch(non_texts), device=device)
+        pref_penalties = torch.tensor(rule_model.get_penalty_batch(pref_texts), device=device)
+        non_penalties = torch.tensor(rule_model.get_penalty_batch(non_texts), device=device)
         pref_rewards = torch.tanh(pref_penalties / 5.0)
         non_rewards = torch.tanh(non_penalties / 5.0)
 
@@ -435,11 +435,11 @@ def rule_based_dpo_loss_soft(
     return total_loss
 
 # ======================== RRSA-WDOOR Loss (Type14) ========================
-def rule_based_wdoor_loss_soft(
+def penalty_based_wdoor_loss(
     main_model,
     ref_model,
     inputs,
-    rule_model: RuleRewardModel,
+    rule_model: RulePenaltyModel,
     tokenizer,
     beta=1.0, 
     alpha=0.2
@@ -462,11 +462,11 @@ def rule_based_wdoor_loss_soft(
 
     with torch.no_grad():
         pref_rewards = torch.tensor(
-            rule_model.get_reward_batch(pref_texts),
+            rule_model.get_penalty_batch(pref_texts),
             device=device
         )
         non_rewards = torch.tensor(
-            rule_model.get_reward_batch(non_texts),
+            rule_model.get_penalty_batch(non_texts),
             device=device
         )
 
@@ -566,8 +566,8 @@ class WDOORTrainer(Trainer):
         return wgdnpo_loss(model, self.ref_model, self.dpo_model, inputs, adaptive_method='exp', tau=self.tau)
 
 
-class RuleDPOTrainer(Trainer):
-    def __init__(self, ref_model, rule_model: RuleRewardModel, tokenizer, 
+class PenaltyDPOTrainer(Trainer):
+    def __init__(self, ref_model, rule_model: RulePenaltyModel, tokenizer, 
                  beta=0.5, alpha=0.2, reward_temp=0.3, clip_magnitude=5.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ref_model = ref_model
@@ -579,7 +579,7 @@ class RuleDPOTrainer(Trainer):
         self.clip_magnitude = clip_magnitude
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        loss = rule_based_dpo_loss_soft(
+        loss = penalty_based_dpo_loss(
             model, self.ref_model, inputs, 
             self.rule_model, self.tokenizer,
             beta=self.beta, 
@@ -590,11 +590,11 @@ class RuleDPOTrainer(Trainer):
         return (loss, None) if return_outputs else loss
 
 
-class RuleWDOORTrainer(Trainer):
+class PenaltyWDOORTrainer(Trainer):
     def __init__(
         self,
         ref_model,
-        rule_model: RuleRewardModel,
+        rule_model: RulePenaltyModel,
         tokenizer,
         beta=1.0,
         alpha=0.2,
@@ -609,7 +609,7 @@ class RuleWDOORTrainer(Trainer):
         self.alpha = alpha
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        loss = rule_based_wdoor_loss_soft(
+        loss = penalty_based_wdoor_loss(
             model,
             self.ref_model,
             inputs,

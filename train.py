@@ -47,7 +47,7 @@ model = AutoModelForCausalLM.from_pretrained(
     args.base_model,
     torch_dtype=torch.bfloat16,
     trust_remote_code=True,
-    device_map='auto'
+    device_map='cuda:0'
 )
 
 model.config.use_cache = False
@@ -66,8 +66,9 @@ if args.type in [9, 12, 14, 15]:
     ref_model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         torch_dtype=torch.bfloat16,
-        device_map='auto',
-        trust_remote_code=True
+        device_map='cuda:0',
+        trust_remote_code=True,
+        load_in_8bit=True
     )
     ref_model.eval()
     for param in ref_model.parameters():
@@ -81,7 +82,7 @@ if args.type == 12:  # 仅原WDOOR(12)需要，规则WDOOR(14)不需要
         dpo_model = AutoModelForCausalLM.from_pretrained(
             dpo_name,
             torch_dtype=torch.bfloat16,
-            device_map='auto',
+            device_map='cuda:0',
             trust_remote_code=True
         )
         dpo_model.eval()
@@ -180,7 +181,7 @@ training_arguments = TrainingArguments(
     num_train_epochs=10,
     per_device_train_batch_size=2,
     gradient_accumulation_steps=1,
-    optim="adamw_8bit",
+    optim="paged_adamw_8bit",
     learning_rate=1e-5,
     logging_steps=1,
     logging_strategy="steps",
