@@ -18,31 +18,96 @@ def should_compute_utility():
 
 # ======================== 规则惩罚蒸馏模型 ========================
 class PenaltyDistillationModel:
-    def __init__(self, model_path):
-        self.penalty_tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.penalty_model = AutoModelForSequenceClassification.from_pretrained(model_path)
-        self.penalty_model.eval()
-        self.device = torch.device("cpu")
-        self.penalty_model.to(self.device)
-        
+    def __init__(
+        self,
+        model_path,
+        device="cpu",
+        max_length=512,
+    ):
+        self.penalty_tokenizer = (
+            AutoTokenizer.from_pretrained(model_path)
+        )
+        self.penalty_model = (
+            AutoModelForSequenceClassification.from_pretrained(
+                model_path
+            )
+        )
+
+        self.device = torch.device(device)
+        self.max_length = max_length
+
         if self.penalty_tokenizer.pad_token is None:
-            self.penalty_tokenizer.pad_token = self.penalty_tokenizer.eos_token
-            self.penalty_model.config.pad_token_id = self.penalty_tokenizer.pad_token_id
+            if self.penalty_tokenizer.eos_token is None:
+                raise ValueError(
+                    "Penalty tokenizer must define a "
+                    "pad token or EOS token."
+                )
+
+            self.penalty_tokenizer.pad_token = (
+                self.penalty_tokenizer.eos_token
+            )
+            self.penalty_model.config.pad_token_id = (
+                self.penalty_tokenizer.pad_token_id
+            )
+
         self.penalty_tokenizer.padding_side = "right"
         self.penalty_tokenizer.truncation_side = "right"
-    
+
+        self.penalty_model.to(self.device)
+        self.penalty_model.eval()
+        self.penalty_model.requires_grad_(False)
+
     @torch.no_grad()
-    def get_penalty_batch(self, texts: List[str]) -> List[float]:
+    def get_penalty_batch(
+        self,
+        texts: List[str],
+    ) -> torch.Tensor:
+        if not texts:
+            raise ValueError(
+                "Penalty model received an empty batch."
+            )
+
+        if any(not text.strip() for text in texts):
+            raise ValueError(
+                "Penalty model received an empty response."
+            )
+
         inputs = self.penalty_tokenizer(
             texts,
             return_tensors="pt",
             truncation=True,
-            max_length=512,
-            padding=True
+            max_length=self.max_length,
+            padding=True,
         ).to(self.device)
 
-        penalties = self.penalty_model(**inputs).logits.squeeze(-1)
-        penalties = torch.clamp(penalties, min=-1.0, max=0.0)
+        raw_penalties = (
+            self.penalty_model(**inputs)
+            .logits
+            .squeeze(-1)
+            .float()
+        )
+
+        penalties = raw_penalties.clamp(
+            min=-1.0,
+            max=0.0,
+        )
+
+        if penalties.ndim == 0:
+            penalties = penalties.unsqueeze(0)
+
+        expected_shape = (len(texts),)
+
+        if penalties.shape != expected_shape:
+            raise ValueError(
+                f"Expected penalty shape {expected_shape}, "
+                f"got {tuple(penalties.shape)}."
+            )
+
+        if not torch.isfinite(penalties).all():
+            raise FloatingPointError(
+                "Penalty model returned non-finite values."
+            )
+
         return penalties
 
 # 工具函数
@@ -86,6 +151,127 @@ def get_log_probs(logits: torch.Tensor, labels: torch.Tensor):
     log_probs = log_probs * valid_mask
 
     return log_probs
+def get_rapo_sequence_log_probs(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+) -> torch.Tensor:
+    if logits.ndim != 3:
+        raise ValueError(
+            "logits must have shape [B, T, V]."
+        )
+
+    if labels.ndim != 2:
+        raise ValueError(
+            "labels must have shape [B, T]."
+        )
+
+    if logits.shape[:2] != labels.shape:
+        raise ValueError(
+            "logits and labels must have matching "
+            "batch and sequence dimensions."
+        )
+
+    shift_logits = (
+        logits[..., :-1, :]
+        .contiguous()
+        .float()
+    )
+
+    shift_labels = (
+        labels[..., 1:]
+        .contiguous()
+    )
+
+    valid_mask = shift_labels != -100
+    token_count = valid_mask.sum(dim=-1)
+
+    if (token_count == 0).any():
+        invalid_indices = (
+            (token_count == 0)
+            .nonzero(as_tuple=False)
+            .flatten()
+            .tolist()
+        )
+
+        raise ValueError(
+            "Samples without labeled response tokens "
+            f"at batch indices {invalid_indices}."
+        )
+
+    safe_labels = shift_labels.masked_fill(
+        ~valid_mask,
+        0,
+    )
+
+    all_log_probs = F.log_softmax(
+        shift_logits,
+        dim=-1,
+    )
+
+    token_log_probs = all_log_probs.gather(
+        dim=-1,
+        index=safe_labels.unsqueeze(-1),
+    ).squeeze(-1)
+
+    token_log_probs = token_log_probs.masked_fill(
+        ~valid_mask,
+        0.0,
+    )
+
+    if not torch.isfinite(token_log_probs).all():
+        raise FloatingPointError(
+            "Non-finite token log-probabilities detected."
+        )
+
+    sequence_log_probs = (
+        token_log_probs.sum(dim=-1)
+        / token_count.to(token_log_probs.dtype)
+    )
+
+    return sequence_log_probs
+
+def decode_rapo_responses(
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    tokenizer,
+) -> List[str]:
+    if input_ids.shape != labels.shape:
+        raise ValueError(
+            "input_ids and labels must have "
+            "the same shape."
+        )
+
+    texts = []
+
+    for sample_ids, sample_labels in zip(
+        input_ids,
+        labels,
+    ):
+        sample_ids = sample_ids.detach().cpu()
+        sample_labels = sample_labels.detach().cpu()
+
+        response_mask = sample_labels != -100
+        response_ids = sample_ids[response_mask]
+
+        if response_ids.numel() == 0:
+            raise ValueError(
+                "Cannot score a sample without "
+                "labeled response tokens."
+            )
+
+        text = tokenizer.decode(
+            response_ids.tolist(),
+            skip_special_tokens=True,
+        ).strip()
+
+        if not text:
+            raise ValueError(
+                "Decoded response text is empty."
+            )
+
+        texts.append(text)
+
+    return texts
 
 
 def dpo_loss(main_model, ref_model, inputs, beta=0.5, retain_loss=True, alpha=0.2):
@@ -290,7 +476,7 @@ def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=
 
     return final_loss
 
-# ======================== RPSA-DPO Loss (Type15) ========================
+# ======================== RAPO-DPO Loss (Type15) ========================
 def penalty_based_dpo_loss(
     main_model,
     ref_model,
@@ -299,218 +485,1000 @@ def penalty_based_dpo_loss(
     tokenizer,
     beta=0.5,
     alpha=0.2,
-    penalty_temp=0.3,
-    clip_magnitude=5.0
+    penalty_strength=1.0,
+    return_outputs=False,
 ):
-    device = main_model.device
-    bs = inputs["dpo_preferred_input_ids"].size(0)
-
-    pref_texts, non_texts = [], []
-    for i in range(bs):
-        pref = tokenizer.decode(inputs["dpo_preferred_input_ids"][i], skip_special_tokens=True)
-        nonp = tokenizer.decode(inputs["dpo_non_preferred_input_ids"][i], skip_special_tokens=True)
-        if "### Assistant:" in pref:
-            pref_texts.append(pref.split("### Assistant:")[-1].strip())
-        else:
-            pref_texts.append(pref.strip())
-        if "### Assistant:" in nonp:
-            non_texts.append(nonp.split("### Assistant:")[-1].strip())
-        else:
-            non_texts.append(nonp.strip())
-
-    if len(pref_texts) == 0 or len(non_texts) == 0:
-        print("警告：提取的文本为空")
-        dummy_tensor = torch.zeros(1, device=device, requires_grad=True)
-        return dummy_tensor * 0
-
-    with torch.no_grad():
-        pref_penalties = torch.tensor(penalty_model.get_penalty_batch(pref_texts), device=device)
-        non_penalties = torch.tensor(penalty_model.get_penalty_batch(non_texts), device=device)
-        pref_penalties = torch.tanh(pref_penalties / 5.0)
-        non_penalties = torch.tanh(non_penalties / 5.0)
-
-    if torch.isnan(pref_penalties).any() or torch.isnan(non_penalties).any():
-        print("警告：规则奖励包含NaN值")
-        pref_penalties = torch.zeros_like(pref_penalties, device=device)
-        non_penalties = torch.zeros_like(non_penalties, device=device)
-
-    pref_ids = inputs["dpo_preferred_input_ids"].to(device)
-    non_ids = inputs["dpo_non_preferred_input_ids"].to(device)
-    pref_mask = inputs["dpo_preferred_attention_mask"].to(device)
-    non_mask = inputs["dpo_non_preferred_attention_mask"].to(device)
-    pref_labels = inputs["dpo_preferred_labels"].to(device)
-    non_labels = inputs["dpo_non_preferred_labels"].to(device)
-
-    all_ids = torch.cat([pref_ids, non_ids], dim=0)
-    all_mask = torch.cat([pref_mask, non_mask], dim=0)
-
-    outputs = main_model(all_ids, attention_mask=all_mask)
-    logits = outputs.logits
-
-    pref_logits = logits[:bs]
-    non_logits = logits[bs:]
-
-    pref_logits = torch.clamp(pref_logits, -1e4, 1e4)
-    non_logits = torch.clamp(non_logits, -1e4, 1e4)
-
-    pref_lp = get_sequence_log_probs(pref_logits, pref_labels)
-    non_lp = get_sequence_log_probs(non_logits, non_labels)
-
-    if torch.isnan(pref_lp).any() or torch.isnan(non_lp).any():
-        print("警告：对数概率包含NaN值，使用备用计算")
-        return (pref_lp * 0).sum()
-
-    with torch.no_grad():
-        ref_ids = torch.cat([pref_ids, non_ids], dim=0).cpu()
-        ref_mask = torch.cat([pref_mask, non_mask], dim=0).cpu()
-
-        ref_out = ref_model(ref_ids, attention_mask=ref_mask).logits
-        ref_pref = ref_out[:bs].to(device)
-        ref_non = ref_out[bs:].to(device)
-
-        pref_lp_ref = get_sequence_log_probs(ref_pref, pref_labels)
-        non_lp_ref = get_sequence_log_probs(ref_non, non_labels)
-
-    reward_diff = pref_penalties - non_penalties
-    reward_std = reward_diff.std()
-    if reward_std < 1e-8:
-        reward_diff = reward_diff / 1e-8
-    else:
-        reward_diff = reward_diff / (reward_std + 1e-8)
-    
-    if bs == 1:
-        weights = torch.ones_like(reward_diff)
-    else:
-        weights = torch.softmax(
-            torch.clamp(reward_diff / (penalty_temp + 1e-8), -10, 10),
-            dim=0
+    if ref_model is None:
+        raise ValueError(
+            "RAPO-DPO requires a reference model."
         )
 
-    logit_diff = (pref_lp - pref_lp_ref) - (non_lp - non_lp_ref)
-    logit_diff = torch.clamp(logit_diff, -clip_magnitude, clip_magnitude)
+    if penalty_model is None:
+        raise ValueError(
+            "RAPO-DPO requires a penalty model."
+        )
 
-    if torch.isnan(logit_diff).any():
-        print("警告：logit_diff包含NaN值")
-        logit_diff = torch.zeros_like(logit_diff, device=device)
+    if beta <= 0:
+        raise ValueError(
+            "beta must be greater than zero."
+        )
 
-    dpo_loss_val = -F.logsigmoid(beta * logit_diff)
-    dpo_loss_val = (dpo_loss_val * weights).mean()
+    if penalty_strength < 0:
+        raise ValueError(
+            "penalty_strength must be non-negative."
+        )
 
-    if torch.isnan(dpo_loss_val):
-        print("警告：DPO loss为NaN，使用备用值")
-        dpo_loss_val = (pref_lp * 0).sum()
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(
+            "alpha must be in [0, 1]."
+        )
 
-    utility_loss = (pref_lp * 0).sum()
-    
+    device = next(main_model.parameters()).device
+
+    preferred_input_ids_cpu = (
+        inputs["dpo_preferred_input_ids"]
+    )
+    rejected_input_ids_cpu = (
+        inputs["dpo_non_preferred_input_ids"]
+    )
+    preferred_labels_cpu = (
+        inputs["dpo_preferred_labels"]
+    )
+    rejected_labels_cpu = (
+        inputs["dpo_non_preferred_labels"]
+    )
+
+    batch_size = preferred_input_ids_cpu.size(0)
+
+    if rejected_input_ids_cpu.size(0) != batch_size:
+        raise ValueError(
+            "Preferred and rejected batch sizes "
+            "must be equal."
+        )
+
+    preferred_texts = decode_rapo_responses(
+        preferred_input_ids_cpu,
+        preferred_labels_cpu,
+        tokenizer,
+    )
+
+    rejected_texts = decode_rapo_responses(
+        rejected_input_ids_cpu,
+        rejected_labels_cpu,
+        tokenizer,
+    )
+
+    all_penalties = (
+        penalty_model.get_penalty_batch(
+            preferred_texts + rejected_texts
+        )
+        .to(
+            device=device,
+            dtype=torch.float32,
+        )
+    )
+
+    expected_penalty_count = 2 * batch_size
+
+    if all_penalties.shape != (
+        expected_penalty_count,
+    ):
+        raise ValueError(
+            "Penalty batch size does not match "
+            "the preference-pair batch size."
+        )
+
+    preferred_penalties = (
+        all_penalties[:batch_size]
+    )
+    rejected_penalties = (
+        all_penalties[batch_size:]
+    )
+
+    preferred_risk = -preferred_penalties
+    rejected_risk = -rejected_penalties
+
+    risk_gap = (
+        rejected_risk - preferred_risk
+    ).clamp(
+        min=0.0,
+        max=1.0,
+    )
+
+    preferred_input_ids = (
+        preferred_input_ids_cpu.to(device)
+    )
+    rejected_input_ids = (
+        rejected_input_ids_cpu.to(device)
+    )
+    preferred_labels = (
+        preferred_labels_cpu.to(device)
+    )
+    rejected_labels = (
+        rejected_labels_cpu.to(device)
+    )
+    preferred_attention_mask = (
+        inputs["dpo_preferred_attention_mask"]
+        .to(device)
+    )
+    rejected_attention_mask = (
+        inputs["dpo_non_preferred_attention_mask"]
+        .to(device)
+    )
+
+    pair_input_ids = torch.cat(
+        [
+            preferred_input_ids,
+            rejected_input_ids,
+        ],
+        dim=0,
+    )
+
+    pair_attention_mask = torch.cat(
+        [
+            preferred_attention_mask,
+            rejected_attention_mask,
+        ],
+        dim=0,
+    )
+
+    policy_outputs = main_model(
+        pair_input_ids,
+        attention_mask=pair_attention_mask,
+    )
+
+    preferred_policy_log_probs = (
+        get_rapo_sequence_log_probs(
+            policy_outputs.logits[:batch_size],
+            preferred_labels,
+        )
+    )
+
+    rejected_policy_log_probs = (
+        get_rapo_sequence_log_probs(
+            policy_outputs.logits[batch_size:],
+            rejected_labels,
+        )
+    )
+
+    ref_device = next(
+        ref_model.parameters()
+    ).device
+
+    ref_input_ids = pair_input_ids.to(
+        ref_device
+    )
+    ref_attention_mask = (
+        pair_attention_mask.to(ref_device)
+    )
+    ref_preferred_labels = (
+        preferred_labels.to(ref_device)
+    )
+    ref_rejected_labels = (
+        rejected_labels.to(ref_device)
+    )
+
+    with torch.no_grad():
+        ref_outputs = ref_model(
+            ref_input_ids,
+            attention_mask=ref_attention_mask,
+        )
+
+        preferred_ref_log_probs = (
+            get_rapo_sequence_log_probs(
+                ref_outputs.logits[:batch_size],
+                ref_preferred_labels,
+            )
+            .to(device)
+        )
+
+        rejected_ref_log_probs = (
+            get_rapo_sequence_log_probs(
+                ref_outputs.logits[batch_size:],
+                ref_rejected_labels,
+            )
+            .to(device)
+        )
+
+    preferred_log_ratio = (
+        preferred_policy_log_probs
+        - preferred_ref_log_probs
+    )
+
+    rejected_log_ratio = (
+        rejected_policy_log_probs
+        - rejected_ref_log_probs
+    )
+
+    dpo_log_ratio = (
+        preferred_log_ratio
+        - rejected_log_ratio
+    )
+
+    adaptive_safety_margin = (
+        penalty_strength * risk_gap
+    )
+
+    rapo_preference_logit = (
+        beta * dpo_log_ratio
+        - adaptive_safety_margin
+    )
+
+    rapo_dpo_loss_per_pair = (
+        (2.0 / beta)
+        * F.softplus(
+            -rapo_preference_logit
+        )
+    )
+
+    rapo_dpo_loss = (
+        rapo_dpo_loss_per_pair.mean()
+    )
+
+    if not torch.isfinite(rapo_dpo_loss):
+        raise FloatingPointError(
+            "Non-finite RAPO-DPO loss detected."
+        )
+
+    utility_loss = None
+
     if "utility_input_ids" in inputs:
+        required_utility_keys = {
+            "utility_input_ids",
+            "utility_attention_mask",
+            "utility_labels",
+        }
+
+        missing_keys = (
+            required_utility_keys
+            - set(inputs.keys())
+        )
+
+        if missing_keys:
+            raise KeyError(
+                "Missing utility inputs: "
+                f"{sorted(missing_keys)}"
+            )
+
         utility_outputs = main_model(
-            inputs["utility_input_ids"].to(device),
-            attention_mask=inputs["utility_attention_mask"].to(device)
+            inputs["utility_input_ids"].to(
+                device
+            ),
+            attention_mask=inputs[
+                "utility_attention_mask"
+            ].to(device),
         )
-        utility_lp = get_sequence_log_probs(
-            utility_outputs.logits,
-            inputs["utility_labels"].to(device)
+
+        utility_log_probs = (
+            get_rapo_sequence_log_probs(
+                utility_outputs.logits,
+                inputs["utility_labels"].to(
+                    device
+                ),
+            )
         )
-        utility_loss = -utility_lp.mean()
-        
-        if not should_compute_utility():
-            utility_loss = utility_loss.detach()
 
-    # ✅ 修复：alpha 控制 dpo_loss 权重，与原版 DPO 含义一致
-    total_loss = (1 - alpha) * utility_loss + alpha * dpo_loss_val
+        utility_loss = (
+            -utility_log_probs.mean()
+        )
 
-    if torch.isnan(total_loss) or torch.isinf(total_loss):
-        print("警告：总损失为NaN或inf，使用备用值")
-        total_loss = (pref_lp * 0).sum()
+        total_loss = (
+            alpha * rapo_dpo_loss
+            + (1.0 - alpha) * utility_loss
+        )
+    else:
+        total_loss = rapo_dpo_loss
+
+    if not torch.isfinite(total_loss):
+        raise FloatingPointError(
+            "Non-finite total RAPO-DPO loss detected."
+        )
+
+    if return_outputs:
+        return total_loss, policy_outputs
+
+    return total_loss
+# ======================== RAPO-WDOOR Loss (Type14) ========================
+def penalty_based_door_loss(
+    main_model,
+    ref_model,
+    inputs,
+    penalty_model: PenaltyDistillationModel,
+    tokenizer,
+    beta=0.5,
+    alpha=0.2,
+    penalty_strength=1.0,
+    return_outputs=False,
+):
+    if ref_model is None:
+        raise ValueError(
+            "RAPO-DOOR requires a reference model."
+        )
+
+    if penalty_model is None:
+        raise ValueError(
+            "RAPO-DOOR requires a penalty model."
+        )
+
+    if beta <= 0:
+        raise ValueError(
+            "beta must be greater than zero."
+        )
+
+    if penalty_strength < 0:
+        raise ValueError(
+            "penalty_strength must be non-negative."
+        )
+
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(
+            "alpha must be in [0, 1]."
+        )
+
+    required_pair_keys = {
+        "dpo_preferred_input_ids",
+        "dpo_preferred_labels",
+        "dpo_preferred_attention_mask",
+        "dpo_non_preferred_input_ids",
+        "dpo_non_preferred_labels",
+        "dpo_non_preferred_attention_mask",
+    }
+
+    missing_pair_keys = (
+        required_pair_keys - set(inputs.keys())
+    )
+
+    if missing_pair_keys:
+        raise KeyError(
+            "Missing preference-pair inputs: "
+            f"{sorted(missing_pair_keys)}"
+        )
+
+    device = next(main_model.parameters()).device
+
+    preferred_input_ids_cpu = (
+        inputs["dpo_preferred_input_ids"]
+    )
+
+    rejected_input_ids_cpu = (
+        inputs["dpo_non_preferred_input_ids"]
+    )
+
+    preferred_labels_cpu = (
+        inputs["dpo_preferred_labels"]
+    )
+
+    rejected_labels_cpu = (
+        inputs["dpo_non_preferred_labels"]
+    )
+
+    batch_size = preferred_input_ids_cpu.size(0)
+
+    if batch_size == 0:
+        raise ValueError(
+            "RAPO-DOOR received an empty batch."
+        )
+
+    if rejected_input_ids_cpu.size(0) != batch_size:
+        raise ValueError(
+            "Preferred and rejected batch sizes "
+            "must be equal."
+        )
+
+    preferred_texts = decode_rapo_responses(
+        preferred_input_ids_cpu,
+        preferred_labels_cpu,
+        tokenizer,
+    )
+
+    rejected_texts = decode_rapo_responses(
+        rejected_input_ids_cpu,
+        rejected_labels_cpu,
+        tokenizer,
+    )
+
+    all_penalties = (
+        penalty_model.get_penalty_batch(
+            preferred_texts + rejected_texts
+        )
+        .to(
+            device=device,
+            dtype=torch.float32,
+        )
+    )
+
+    expected_penalty_shape = (
+        2 * batch_size,
+    )
+
+    if all_penalties.shape != expected_penalty_shape:
+        raise ValueError(
+            f"Expected penalty shape "
+            f"{expected_penalty_shape}, "
+            f"got {tuple(all_penalties.shape)}."
+        )
+
+    preferred_penalties = (
+        all_penalties[:batch_size]
+        .clamp(
+            min=-1.0,
+            max=0.0,
+        )
+    )
+
+    rejected_penalties = (
+        all_penalties[batch_size:]
+        .clamp(
+            min=-1.0,
+            max=0.0,
+        )
+    )
+
+    preferred_risk = (
+        -preferred_penalties
+    ).clamp(
+        min=0.0,
+        max=1.0,
+    )
+
+    rejected_risk = (
+        -rejected_penalties
+    ).clamp(
+        min=0.0,
+        max=1.0,
+    )
+
+    risk_gap = (
+        rejected_risk
+        - preferred_risk
+    ).clamp(
+        min=0.0,
+        max=1.0,
+    )
+
+    adaptive_safety_margin = (
+        penalty_strength
+        * risk_gap
+    )
+
+    preferred_input_ids = (
+        preferred_input_ids_cpu.to(device)
+    )
+
+    rejected_input_ids = (
+        rejected_input_ids_cpu.to(device)
+    )
+
+    preferred_labels = (
+        preferred_labels_cpu.to(device)
+    )
+
+    rejected_labels = (
+        rejected_labels_cpu.to(device)
+    )
+
+    preferred_attention_mask = (
+        inputs["dpo_preferred_attention_mask"]
+        .to(device)
+    )
+
+    rejected_attention_mask = (
+        inputs["dpo_non_preferred_attention_mask"]
+        .to(device)
+    )
+
+    pair_input_ids = torch.cat(
+        [
+            preferred_input_ids,
+            rejected_input_ids,
+        ],
+        dim=0,
+    )
+
+    pair_attention_mask = torch.cat(
+        [
+            preferred_attention_mask,
+            rejected_attention_mask,
+        ],
+        dim=0,
+    )
+
+    policy_outputs = main_model(
+        pair_input_ids,
+        attention_mask=pair_attention_mask,
+    )
+
+    preferred_policy_log_probs = (
+        get_rapo_sequence_log_probs(
+            policy_outputs.logits[:batch_size],
+            preferred_labels,
+        )
+    )
+
+    rejected_policy_log_probs = (
+        get_rapo_sequence_log_probs(
+            policy_outputs.logits[batch_size:],
+            rejected_labels,
+        )
+    )
+
+    ref_device = next(
+        ref_model.parameters()
+    ).device
+
+    with torch.no_grad():
+        rejected_ref_outputs = ref_model(
+            rejected_input_ids.to(ref_device),
+            attention_mask=(
+                rejected_attention_mask.to(
+                    ref_device
+                )
+            ),
+        )
+
+        rejected_ref_log_probs = (
+            get_rapo_sequence_log_probs(
+                rejected_ref_outputs.logits,
+                rejected_labels.to(ref_device),
+            )
+            .to(device)
+        )
+
+    rejected_log_ratio = (
+        rejected_policy_log_probs
+        - rejected_ref_log_probs
+    )
+
+    gd_loss_per_sample = (
+        -preferred_policy_log_probs
+    )
+
+    npo_logit = (
+        beta * rejected_log_ratio
+        + adaptive_safety_margin
+    )
+
+    npo_loss_per_sample = (
+        (2.0 / beta)
+        * F.softplus(npo_logit)
+    )
+
+    gd_loss = (
+        gd_loss_per_sample.mean()
+    )
+
+    npo_loss = (
+        npo_loss_per_sample.mean()
+    )
+
+    rapo_door_loss = (
+        gd_loss + npo_loss
+    )
+
+    if not torch.isfinite(gd_loss):
+        raise FloatingPointError(
+            "Non-finite RAPO-DOOR GD loss detected."
+        )
+
+    if not torch.isfinite(npo_loss):
+        raise FloatingPointError(
+            "Non-finite RAPO-DOOR NPO loss detected."
+        )
+
+    utility_loss = None
+
+    utility_keys = {
+        "utility_input_ids",
+        "utility_attention_mask",
+        "utility_labels",
+    }
+
+    present_utility_keys = (
+        utility_keys & set(inputs.keys())
+    )
+
+    if present_utility_keys:
+        missing_utility_keys = (
+            utility_keys - set(inputs.keys())
+        )
+
+        if missing_utility_keys:
+            raise KeyError(
+                "Incomplete utility inputs; missing: "
+                f"{sorted(missing_utility_keys)}"
+            )
+
+        utility_outputs = main_model(
+            inputs["utility_input_ids"].to(
+                device
+            ),
+            attention_mask=inputs[
+                "utility_attention_mask"
+            ].to(device),
+        )
+
+        utility_log_probs = (
+            get_rapo_sequence_log_probs(
+                utility_outputs.logits,
+                inputs["utility_labels"].to(
+                    device
+                ),
+            )
+        )
+
+        utility_loss = (
+            -utility_log_probs.mean()
+        )
+
+        total_loss = (
+            alpha * rapo_door_loss
+            + (1.0 - alpha) * utility_loss
+        )
+    else:
+        total_loss = rapo_door_loss
+
+    if not torch.isfinite(total_loss):
+        raise FloatingPointError(
+            "Non-finite total RAPO-DOOR loss detected."
+        )
+
+    if return_outputs:
+        return total_loss, policy_outputs
 
     return total_loss
 
-# ======================== RPSA-WDOOR Loss (Type14) ========================
+
+# ======================== RAPO-WDOOR Loss (Type14) ========================
 def penalty_based_wdoor_loss(
     main_model,
     ref_model,
     inputs,
     penalty_model: PenaltyDistillationModel,
     tokenizer,
-    beta=1.0, 
-    alpha=0.2
+    beta=0.5,
+    alpha=0.2,
+    penalty_strength=1.0,
+    return_outputs=False,
 ):
-    device = main_model.device
-    bs = inputs['dpo_preferred_input_ids'].size(0)
+    if ref_model is None:
+        raise ValueError(
+            "RAPO-WDOOR requires a reference model."
+        )
 
-    pref_texts, non_texts = [], []
-    for i in range(bs):
-#        pref = tokenizer.decode(
-#            inputs['dpo_preferred_input_ids'][i],
-#            skip_special_tokens=True
-#        ).split("### Assistant:")[-1].strip()
-        if "### Assistant:" in pref:
-            pref = pref.split("### Assistant:")[-1].strip()
-        elif "<start_of_turn>model" in pref:
-            pref = pref.split("<start_of_turn>model")[-1].replace("<end_of_turn>", "").strip()
-        nonp = tokenizer.decode(
-            inputs['dpo_non_preferred_input_ids'][i],
-            skip_special_tokens=True
-        ).split("### Assistant:")[-1].strip()
-        pref_texts.append(pref)
-        non_texts.append(nonp)
+    if penalty_model is None:
+        raise ValueError(
+            "RAPO-WDOOR requires a penalty model."
+        )
+
+    if beta <= 0:
+        raise ValueError(
+            "beta must be greater than zero."
+        )
+
+    if penalty_strength < 0:
+        raise ValueError(
+            "penalty_strength must be non-negative."
+        )
+
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(
+            "alpha must be in [0, 1]."
+        )
+
+    required_pair_keys = {
+        "dpo_preferred_input_ids",
+        "dpo_preferred_labels",
+        "dpo_preferred_attention_mask",
+        "dpo_non_preferred_input_ids",
+        "dpo_non_preferred_labels",
+        "dpo_non_preferred_attention_mask",
+    }
+
+    missing_pair_keys = (
+        required_pair_keys - set(inputs.keys())
+    )
+
+    if missing_pair_keys:
+        raise KeyError(
+            "Missing preference-pair inputs: "
+            f"{sorted(missing_pair_keys)}"
+        )
+
+    device = next(main_model.parameters()).device
+
+    preferred_input_ids_cpu = (
+        inputs["dpo_preferred_input_ids"]
+    )
+    rejected_input_ids_cpu = (
+        inputs["dpo_non_preferred_input_ids"]
+    )
+    preferred_labels_cpu = (
+        inputs["dpo_preferred_labels"]
+    )
+    rejected_labels_cpu = (
+        inputs["dpo_non_preferred_labels"]
+    )
+
+    batch_size = preferred_input_ids_cpu.size(0)
+
+    if batch_size == 0:
+        raise ValueError(
+            "RAPO-WDOOR received an empty batch."
+        )
+
+    if rejected_input_ids_cpu.size(0) != batch_size:
+        raise ValueError(
+            "Preferred and rejected batch sizes "
+            "must be equal."
+        )
+
+    preferred_texts = decode_rapo_responses(
+        preferred_input_ids_cpu,
+        preferred_labels_cpu,
+        tokenizer,
+    )
+
+    rejected_texts = decode_rapo_responses(
+        rejected_input_ids_cpu,
+        rejected_labels_cpu,
+        tokenizer,
+    )
+
+    all_penalties = (
+        penalty_model.get_penalty_batch(
+            preferred_texts + rejected_texts
+        )
+        .to(
+            device=device,
+            dtype=torch.float32,
+        )
+    )
+
+    expected_penalty_shape = (
+        2 * batch_size,
+    )
+
+    if all_penalties.shape != expected_penalty_shape:
+        raise ValueError(
+            f"Expected penalty shape "
+            f"{expected_penalty_shape}, "
+            f"got {tuple(all_penalties.shape)}."
+        )
+
+    preferred_penalties = (
+        all_penalties[:batch_size]
+        .clamp(
+            min=-1.0,
+            max=0.0,
+        )
+    )
+
+    rejected_penalties = (
+        all_penalties[batch_size:]
+        .clamp(
+            min=-1.0,
+            max=0.0,
+        )
+    )
+
+    preferred_risk = (
+        -preferred_penalties
+    ).clamp(
+        min=0.0,
+        max=1.0,
+    )
+
+    rejected_risk = (
+        -rejected_penalties
+    ).clamp(
+        min=0.0,
+        max=1.0,
+    )
+
+    preferred_safety_weight = (
+        1.0 - preferred_risk
+    )
+
+    rejected_risk_weight = (
+        rejected_risk
+    )
+
+    risk_gap = (
+        rejected_risk - preferred_risk
+    ).clamp(
+        min=0.0,
+        max=1.0,
+    )
+
+    adaptive_safety_margin = (
+        penalty_strength * risk_gap
+    )
+
+    preferred_input_ids = (
+        preferred_input_ids_cpu.to(device)
+    )
+    rejected_input_ids = (
+        rejected_input_ids_cpu.to(device)
+    )
+    preferred_labels = (
+        preferred_labels_cpu.to(device)
+    )
+    rejected_labels = (
+        rejected_labels_cpu.to(device)
+    )
+
+    preferred_attention_mask = (
+        inputs["dpo_preferred_attention_mask"]
+        .to(device)
+    )
+    rejected_attention_mask = (
+        inputs["dpo_non_preferred_attention_mask"]
+        .to(device)
+    )
+
+    pair_input_ids = torch.cat(
+        [
+            preferred_input_ids,
+            rejected_input_ids,
+        ],
+        dim=0,
+    )
+
+    pair_attention_mask = torch.cat(
+        [
+            preferred_attention_mask,
+            rejected_attention_mask,
+        ],
+        dim=0,
+    )
+
+    policy_outputs = main_model(
+        pair_input_ids,
+        attention_mask=pair_attention_mask,
+    )
+
+    preferred_policy_log_probs = (
+        get_rapo_sequence_log_probs(
+            policy_outputs.logits[:batch_size],
+            preferred_labels,
+        )
+    )
+
+    rejected_policy_log_probs = (
+        get_rapo_sequence_log_probs(
+            policy_outputs.logits[batch_size:],
+            rejected_labels,
+        )
+    )
+
+    ref_device = next(
+        ref_model.parameters()
+    ).device
 
     with torch.no_grad():
-        pref_penalties = torch.tensor(
-            penalty_model.get_penalty_batch(pref_texts),
-            device=device
+        rejected_ref_outputs = ref_model(
+            rejected_input_ids.to(ref_device),
+            attention_mask=(
+                rejected_attention_mask.to(
+                    ref_device
+                )
+            ),
         )
-        non_penalties = torch.tensor(
-            penalty_model.get_penalty_batch(non_texts),
-            device=device
+
+        rejected_ref_log_probs = (
+            get_rapo_sequence_log_probs(
+                rejected_ref_outputs.logits,
+                rejected_labels.to(ref_device),
+            )
+            .to(device)
         )
-        # safe 文本 penalty=0  → weight=1（高权重，鼓励 safe）
-        # unsafe 文本 penalty=-1 → weight=0（低权重）
-        pref_weights = 1 + pref_penalties
-        # NPO 项：unsafe 越不安全权重越高
-        # safe 文本 penalty=0  → weight=0
-        # unsafe 文本 penalty=-1 → weight=1（强烈惩罚）
-        non_weights = -non_penalties 
 
-    pref_ids = inputs['dpo_preferred_input_ids'].to(device)
-    non_ids = inputs['dpo_non_preferred_input_ids'].to(device)
-    pref_mask = inputs['dpo_preferred_attention_mask'].to(device)
-    non_mask = inputs['dpo_non_preferred_attention_mask'].to(device)
-    pref_labels = inputs['dpo_preferred_labels'].to(device)
-    non_labels = inputs['dpo_non_preferred_labels'].to(device)
+    rejected_log_ratio = (
+        rejected_policy_log_probs
+        - rejected_ref_log_probs
+    )
 
-    all_ids = torch.cat([pref_ids, non_ids], dim=0)
-    all_mask = torch.cat([pref_mask, non_mask], dim=0)
+    gd_loss_per_sample = (
+        preferred_safety_weight
+        * (-preferred_policy_log_probs)
+    )
 
-    logits = main_model(all_ids, attention_mask=all_mask).logits
-    pref_logits, non_logits = logits[:bs], logits[bs:]
+    npo_logit = (
+        beta * rejected_log_ratio
+        + adaptive_safety_margin
+    )
 
-    pref_lp = get_sequence_log_probs(pref_logits, pref_labels)
-    non_lp = get_sequence_log_probs(non_logits, non_labels)
+    npo_loss_per_sample = (
+        rejected_risk_weight
+        * (2.0 / beta)
+        * F.softplus(npo_logit)
+    )
 
-    # ✅ 修复：GD 和 NPO 双目标均使用规则加权
-    # GD：鼓励 safe response
-    gd_loss = -(pref_weights * pref_lp).mean()
-    # NPO：惩罚 unsafe response（原本用 logit 直接算，现在用规则加权）
-    npo_loss = (non_weights * non_lp).mean()
+    gd_loss = (
+        gd_loss_per_sample.mean()
+    )
 
-    wdoor_loss = gd_loss + npo_loss
+    npo_loss = (
+        npo_loss_per_sample.mean()
+    )
 
-    utility_loss = (pref_lp * 0).sum()
-    if should_compute_utility() and 'utility_input_ids' in inputs:
+    rapo_wdoor_loss = (
+        gd_loss + npo_loss
+    )
+
+    if not torch.isfinite(gd_loss):
+        raise FloatingPointError(
+            "Non-finite RAPO-WDOOR GD loss detected."
+        )
+
+    if not torch.isfinite(npo_loss):
+        raise FloatingPointError(
+            "Non-finite RAPO-WDOOR NPO loss detected."
+        )
+
+    utility_loss = None
+
+    utility_keys = {
+        "utility_input_ids",
+        "utility_attention_mask",
+        "utility_labels",
+    }
+
+    present_utility_keys = (
+        utility_keys & set(inputs.keys())
+    )
+
+    if present_utility_keys:
+        missing_utility_keys = (
+            utility_keys - set(inputs.keys())
+        )
+
+        if missing_utility_keys:
+            raise KeyError(
+                "Incomplete utility inputs; missing: "
+                f"{sorted(missing_utility_keys)}"
+            )
+
         utility_outputs = main_model(
-            inputs['utility_input_ids'].to(device),
-            attention_mask=inputs['utility_attention_mask'].to(device)
+            inputs["utility_input_ids"].to(
+                device
+            ),
+            attention_mask=inputs[
+                "utility_attention_mask"
+            ].to(device),
         )
-        utility_lp = get_sequence_log_probs(
-            utility_outputs.logits,
-            inputs['utility_labels'].to(device)
-        )
-        utility_loss = -utility_lp.mean()
 
-    # ✅ 修复：alpha 含义与原版 WDOOR 一致
-    total_loss = (1 - alpha) * utility_loss + alpha * wdoor_loss
+        utility_log_probs = (
+            get_rapo_sequence_log_probs(
+                utility_outputs.logits,
+                inputs["utility_labels"].to(
+                    device
+                ),
+            )
+        )
+
+        utility_loss = (
+            -utility_log_probs.mean()
+        )
+
+        total_loss = (
+            alpha * rapo_wdoor_loss
+            + (1.0 - alpha) * utility_loss
+        )
+    else:
+        total_loss = rapo_wdoor_loss
+
+    if not torch.isfinite(total_loss):
+        raise FloatingPointError(
+            "Non-finite total RAPO-WDOOR loss detected."
+        )
+
+    if return_outputs:
+        return total_loss, policy_outputs
+
+
     return total_loss
+
 
 
 # ======================== Trainer 类 ========================
@@ -563,55 +1531,142 @@ class WDOORTrainer(Trainer):
 
 
 class PenaltyDPOTrainer(Trainer):
-    def __init__(self, ref_model, penalty_model: PenaltyDistillationModel, tokenizer, 
-                 beta=0.5, alpha=0.2, penalty_temp=0.3, clip_magnitude=5.0, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        ref_model,
+        penalty_model: PenaltyDistillationModel,
+        tokenizer,
+        beta=0.5,
+        alpha=0.2,
+        penalty_strength=1.0,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(
+            *args,
+            **kwargs,
+        )
+
         self.ref_model = ref_model
         self.penalty_model = penalty_model
-        self.tokenizer = tokenizer
+        self.rapo_tokenizer = tokenizer
         self.beta = beta
         self.alpha = alpha
-        self.penalty_temp = penalty_temp
-        self.clip_magnitude = clip_magnitude
-
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        loss = penalty_based_dpo_loss(
-            model, self.ref_model, inputs, 
-            self.penalty_model, self.tokenizer,
-            beta=self.beta, 
-            alpha=self.alpha,
-            penalty_temp=self.penalty_temp,
-            clip_magnitude=self.clip_magnitude
+        self.penalty_strength = (
+            penalty_strength
         )
-        return (loss, None) if return_outputs else loss
 
+    def compute_loss(
+        self,
+        model,
+        inputs,
+        return_outputs=False,
+        num_items_in_batch=None,
+    ):
+        return penalty_based_dpo_loss(
+            main_model=model,
+            ref_model=self.ref_model,
+            inputs=inputs,
+            penalty_model=self.penalty_model,
+            tokenizer=self.rapo_tokenizer,
+            beta=self.beta,
+            alpha=self.alpha,
+            penalty_strength=(
+                self.penalty_strength
+            ),
+            return_outputs=return_outputs,
+        )
 
+class PenaltyDOORTrainer(Trainer):
+    def __init__(
+        self,
+        ref_model,
+        penalty_model: PenaltyDistillationModel,
+        tokenizer,
+        beta=0.5,
+        alpha=0.2,
+        penalty_strength=1.0,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(
+            *args,
+            **kwargs,
+        )
+
+        self.ref_model = ref_model
+        self.penalty_model = penalty_model
+        self.rapo_tokenizer = tokenizer
+        self.beta = beta
+        self.alpha = alpha
+        self.penalty_strength = (
+            penalty_strength
+        )
+
+    def compute_loss(
+        self,
+        model,
+        inputs,
+        return_outputs=False,
+        num_items_in_batch=None,
+    ):
+        return penalty_based_door_loss(
+            main_model=model,
+            ref_model=self.ref_model,
+            inputs=inputs,
+            penalty_model=self.penalty_model,
+            tokenizer=self.rapo_tokenizer,
+            beta=self.beta,
+            alpha=self.alpha,
+            penalty_strength=(
+                self.penalty_strength
+            ),
+            return_outputs=return_outputs,
+        )
+        
 class PenaltyWDOORTrainer(Trainer):
     def __init__(
         self,
         ref_model,
-        penalty_modell: PenaltyDistillationModel,
+        penalty_model: PenaltyDistillationModel,
         tokenizer,
-        beta=1.0,
+        beta=0.5,
         alpha=0.2,
+        penalty_strength=1.0,
         *args,
-        **kwargs
+        **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            *args,
+            **kwargs,
+        )
+
         self.ref_model = ref_model
         self.penalty_model = penalty_model
-        self.tokenizer = tokenizer
+        self.rapo_tokenizer = tokenizer
         self.beta = beta
         self.alpha = alpha
-
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        loss = penalty_based_wdoor_loss(
-            model,
-            self.ref_model,
-            inputs,
-            self.penalty_model,
-            self.tokenizer,
-            beta=self.beta,
-            alpha=self.alpha
+        self.penalty_strength = (
+            penalty_strength
         )
-        return (loss, None) if return_outputs else loss
+
+    def compute_loss(
+        self,
+        model,
+        inputs,
+        return_outputs=False,
+        num_items_in_batch=None,
+    ):
+        return penalty_based_wdoor_loss(
+            main_model=model,
+            ref_model=self.ref_model,
+            inputs=inputs,
+            penalty_model=self.penalty_model,
+            tokenizer=self.rapo_tokenizer,
+            beta=self.beta,
+            alpha=self.alpha,
+            penalty_strength=(
+                self.penalty_strength
+            ),
+            return_outputs=return_outputs,
+        )
