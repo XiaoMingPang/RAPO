@@ -43,7 +43,7 @@ class PenaltyDistillationModel:
 
         penalties = self.penalty_model(**inputs).logits.squeeze(-1)
         penalties = torch.clamp(penalties, min=-1.0, max=0.0)
-        return penalties.cpu().tolist()
+        return penalties
 
 # 工具函数
 def get_batch_loss(output, labels):
