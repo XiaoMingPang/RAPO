@@ -234,16 +234,13 @@ def exp_weights(dpo_model_log_probs, ref_log_probs, tau):
 
 def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=True, alpha=0.2,
                 adaptive_method='sigmoid', gamma=1.0, tau=5.0):
-    device = next(main_model.parameters).device
-    torch.set_grad_enabled(True)
-    dtype = next(main_model.parameters()).dtype
-    
-    preferred_input_ids = inputs['dpo_preferred_input_ids'].to(device, non_blocking=True)
-    preferred_labels = inputs['dpo_preferred_labels'].to(device, non_blocking=True)
-    preferred_attention_mask = inputs['dpo_preferred_attention_mask'].to(device, non_blocking=True)
-    non_preferred_input_ids = inputs['dpo_non_preferred_input_ids'].to(device, non_blocking=True)
-    non_preferred_labels = inputs['dpo_non_preferred_labels'].to(device, non_blocking=True)
-    non_preferred_attention_mask = inputs['dpo_non_preferred_attention_mask'].to(device, non_blocking=True)
+    device = next(main_model.parameters()).device
+    preferred_input_ids = inputs['dpo_preferred_input_ids'].to(device)
+    preferred_labels = inputs['dpo_preferred_labels'].to(device)
+    preferred_attention_mask = inputs['dpo_preferred_attention_mask'].to(device)
+    non_preferred_input_ids = inputs['dpo_non_preferred_input_ids'].to(device)
+    non_preferred_labels = inputs['dpo_non_preferred_labels'].to(device)
+    non_preferred_attention_mask = inputs['dpo_non_preferred_attention_mask'].to(device)
 
     preferred_outputs_main = main_model(preferred_input_ids, attention_mask=preferred_attention_mask)
     non_preferred_outputs_main = main_model(non_preferred_input_ids, attention_mask=non_preferred_attention_mask)
@@ -251,51 +248,45 @@ def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=
     with torch.no_grad():
         preferred_outputs_ref = ref_model(preferred_input_ids, attention_mask=preferred_attention_mask)
         non_preferred_outputs_ref = ref_model(non_preferred_input_ids, attention_mask=non_preferred_attention_mask)
-        
-        dpo_log_probs = None
-        adaptive_weights = None
-        if adaptive_method in ['sigmoid', 'exp']:
-            dpo_outputs = dpo_model(preferred_input_ids, attention_mask=preferred_attention_mask)
-            dpo_log_probs = get_log_probs(dpo_outputs.logits, preferred_labels)
-            preferred_log_probs_ref = get_log_probs(preferred_outputs_ref.logits, preferred_labels)
-            if adaptive_method == 'sigmoid':
-                adaptive_weights = sigmoid_weights(dpo_log_probs, preferred_log_probs_ref, gamma)
-            elif adaptive_method == 'exp':
-                adaptive_weights = exp_weights(dpo_log_probs, preferred_log_probs_ref, tau)
-            
-            adaptive_weights = adaptive_weights.detach()
 
     preferred_log_probs_main = get_log_probs(preferred_outputs_main.logits, preferred_labels)
     non_preferred_log_probs_main = get_log_probs(non_preferred_outputs_main.logits, non_preferred_labels)
-    if adaptive_weights is None:
-        preferred_log_probs_ref = get_log_probs(preferred_outputs_ref.logits, preferred_labels)
+    preferred_log_probs_ref = get_log_probs(preferred_outputs_ref.logits, preferred_labels)
     non_preferred_log_probs_ref = get_log_probs(non_preferred_outputs_ref.logits, non_preferred_labels)
+
+    if adaptive_method == 'sigmoid':
+        with torch.no_grad():
+            dpo_outputs = dpo_model(preferred_input_ids, attention_mask=preferred_attention_mask)
+        dpo_log_probs = get_log_probs(dpo_outputs.logits, preferred_labels)
+        adaptive_weights = sigmoid_weights(dpo_log_probs, preferred_log_probs_ref, gamma)
+    elif adaptive_method == 'exp':
+        with torch.no_grad():
+            dpo_outputs = dpo_model(preferred_input_ids, attention_mask=preferred_attention_mask)
+        dpo_log_probs = get_log_probs(dpo_outputs.logits, preferred_labels)
+        adaptive_weights = exp_weights(dpo_log_probs, preferred_log_probs_ref, tau)
 
     weighted_log_probs = adaptive_weights * preferred_log_probs_main
     gd_loss_val = -weighted_log_probs.sum(dim=-1).mean()
 
     seq_lengths = torch.sum(non_preferred_attention_mask, dim=1)
-    non_preferred_log_probs_main_seq = get_sequence_log_probs(non_preferred_outputs_main.logits, non_preferred_labels)
+    non_preferred_outputs_main_seq = main_model(non_preferred_input_ids, attention_mask=non_preferred_attention_mask)
+    non_preferred_log_probs_main_seq = get_sequence_log_probs(non_preferred_outputs_main_seq.logits, non_preferred_labels)
     normalized_log_probs = non_preferred_log_probs_main_seq / seq_lengths
     npo_loss_val = -F.logsigmoid(-beta * normalized_log_probs - gamma)
     npo_loss_val = npo_loss_val.sum(dim=-1).mean()
 
     wgdnpo_loss_val = gd_loss_val + (npo_loss_val * 2 / beta)
-
-    final_loss = None
+    
     if retain_loss:
-        utility_input_ids = inputs['utility_input_ids'].to(device, non_blocking=True)
-        utility_labels = inputs['utility_labels'].to(device, non_blocking=True)
-        utility_attention_mask = inputs['utility_attention_mask'].to(device, non_blocking=True)
+        utility_input_ids = inputs['utility_input_ids'].to(device)
+        utility_labels = inputs['utility_labels'].to(device)
+        utility_attention_mask = inputs['utility_attention_mask'].to(device)
         utility_outputs = main_model(utility_input_ids, attention_mask=utility_attention_mask)
         utility_log_probs = get_sequence_log_probs(utility_outputs.logits, utility_labels)
         utility_loss = -utility_log_probs.mean()
         final_loss = alpha * wgdnpo_loss_val + (1 - alpha) * utility_loss
     else:
         final_loss = wgdnpo_loss_val
-
-    del preferred_outputs_ref, non_preferred_outputs_ref, dpo_outputs, dpo_log_probs
-    del weighted_log_probs, normalized_log_probs, seq_lengths
 
     return final_loss
 
