@@ -778,7 +778,7 @@ def penalty_based_dpo_loss(
         return total_loss, policy_outputs
 
     return total_loss
-# ======================== RAPO-WDOOR Loss (Type14) ========================
+# ======================== RAPO-DOOR Loss (Type14) ========================
 def penalty_based_door_loss(
     main_model,
     ref_model,
