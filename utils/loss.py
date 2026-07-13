@@ -16,24 +16,24 @@ def should_compute_utility():
     _GLOBAL_UTILITY_STEP += 1
     return (_GLOBAL_UTILITY_STEP % UTILITY_INTERVAL) == 0
 
-# ======================== 规则惩罚模型 ========================
-class RulePenaltyModel:
+# ======================== 规则惩罚蒸馏模型 ========================
+class PenaltyDistillationModel:
     def __init__(self, model_path):
-        self.rule_tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.rule_model = AutoModelForSequenceClassification.from_pretrained(model_path)
-        self.rule_model.eval()
+        self.penalty_tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.penalty_model = AutoModelForSequenceClassification.from_pretrained(model_path)
+        self.penalty_model.eval()
         self.device = torch.device("cpu")
-        self.rule_model.to(self.device)
+        self.penalty_model.to(self.device)
         
-        if self.rule_tokenizer.pad_token is None:
-            self.rule_tokenizer.pad_token = self.rule_tokenizer.eos_token
-            self.rule_model.config.pad_token_id = self.rule_tokenizer.pad_token_id
-        self.rule_tokenizer.padding_side = "right"
-        self.rule_tokenizer.truncation_side = "right"
+        if self.penalty_tokenizer.pad_token is None:
+            self.penalty_tokenizer.pad_token = self.penalty_tokenizer.eos_token
+            self.penalty_model.config.pad_token_id = self.penalty_tokenizer.pad_token_id
+        self.penalty_tokenizer.padding_side = "right"
+        self.penalty_tokenizer.truncation_side = "right"
     
     @torch.no_grad()
     def get_penalty_batch(self, texts: List[str]) -> List[float]:
-        inputs = self.rule_tokenizer(
+        inputs = self.penalty_tokenizer(
             texts,
             return_tensors="pt",
             truncation=True,
@@ -41,9 +41,9 @@ class RulePenaltyModel:
             padding=True
         ).to(self.device)
 
-        penalties = self.rule_model(**inputs).logits.squeeze(-1)
-        rewards = (penalties).cpu().tolist()
-        return rewards
+        penalties = self.penalty_model(**inputs).logits.squeeze(-1)
+        penalties = torch.clamp(penalties, min=-1.0, max=0.0)
+        return penalties.cpu().tolist()
 
 # 工具函数
 def get_batch_loss(output, labels):
@@ -299,12 +299,12 @@ def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=
 
     return final_loss
 
-# ======================== RRSA-DPO Loss (Type15) ========================
+# ======================== RPSA-DPO Loss (Type15) ========================
 def penalty_based_dpo_loss(
     main_model,
     ref_model,
     inputs,
-    rule_model: RulePenaltyModel,
+    penalty_model: PenaltyDistillationModel,
     tokenizer,
     beta=0.5,
     alpha=0.2,
@@ -333,8 +333,8 @@ def penalty_based_dpo_loss(
         return dummy_tensor * 0
 
     with torch.no_grad():
-        pref_penalties = torch.tensor(rule_model.get_penalty_batch(pref_texts), device=device)
-        non_penalties = torch.tensor(rule_model.get_penalty_batch(non_texts), device=device)
+        pref_penalties = torch.tensor(penalty_model.get_penalty_batch(pref_texts), device=device)
+        non_penalties = torch.tensor(penalty_model.get_penalty_batch(non_texts), device=device)
         pref_penalties = torch.tanh(pref_penalties / 5.0)
         non_penalties = torch.tanh(non_penalties / 5.0)
 
@@ -434,12 +434,12 @@ def penalty_based_dpo_loss(
 
     return total_loss
 
-# ======================== RRSA-WDOOR Loss (Type14) ========================
+# ======================== RPSA-WDOOR Loss (Type14) ========================
 def penalty_based_wdoor_loss(
     main_model,
     ref_model,
     inputs,
-    rule_model: RulePenaltyModel,
+    penalty_model: PenaltyDistillationModel,
     tokenizer,
     beta=1.0, 
     alpha=0.2
@@ -466,11 +466,11 @@ def penalty_based_wdoor_loss(
 
     with torch.no_grad():
         pref_penalties = torch.tensor(
-            rule_model.get_penalty_batch(pref_texts),
+            penalty_model.get_penalty_batch(pref_texts),
             device=device
         )
         non_penalties = torch.tensor(
-            rule_model.get_penalty_batch(non_texts),
+            penalty_model.get_penalty_batch(non_texts),
             device=device
         )
         # safe 文本 penalty=0  → weight=1（高权重，鼓励 safe）
@@ -572,11 +572,11 @@ class WDOORTrainer(Trainer):
 
 
 class PenaltyDPOTrainer(Trainer):
-    def __init__(self, ref_model, rule_model: RulePenaltyModel, tokenizer, 
+    def __init__(self, ref_model, penalty_model: PenaltyDistillationModel, tokenizer, 
                  beta=0.5, alpha=0.2, penalty_temp=0.3, clip_magnitude=5.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ref_model = ref_model
-        self.rule_model = rule_model
+        self.penalty_model = penalty_model
         self.tokenizer = tokenizer
         self.beta = beta
         self.alpha = alpha
@@ -586,7 +586,7 @@ class PenaltyDPOTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         loss = penalty_based_dpo_loss(
             model, self.ref_model, inputs, 
-            self.rule_model, self.tokenizer,
+            self.penalty_model, self.tokenizer,
             beta=self.beta, 
             alpha=self.alpha,
             penalty_temp=self.penalty_temp,
@@ -599,7 +599,7 @@ class PenaltyWDOORTrainer(Trainer):
     def __init__(
         self,
         ref_model,
-        rule_model: RulePenaltyModel,
+        penalty_modell: PenaltyDistillationModel,
         tokenizer,
         beta=1.0,
         alpha=0.2,
@@ -608,7 +608,7 @@ class PenaltyWDOORTrainer(Trainer):
     ):
         super().__init__(*args, **kwargs)
         self.ref_model = ref_model
-        self.rule_model = rule_model
+        self.penalty_model = penalty_model
         self.tokenizer = tokenizer
         self.beta = beta
         self.alpha = alpha
@@ -618,7 +618,7 @@ class PenaltyWDOORTrainer(Trainer):
             model,
             self.ref_model,
             inputs,
-            self.rule_model,
+            self.penalty_model,
             self.tokenizer,
             beta=self.beta,
             alpha=self.alpha
