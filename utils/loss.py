@@ -308,7 +308,7 @@ def penalty_based_dpo_loss(
     tokenizer,
     beta=0.5,
     alpha=0.2,
-    reward_temp=0.3,
+    penalty_temp=0.3,
     clip_magnitude=5.0
 ):
     device = main_model.device
@@ -335,13 +335,13 @@ def penalty_based_dpo_loss(
     with torch.no_grad():
         pref_penalties = torch.tensor(rule_model.get_penalty_batch(pref_texts), device=device)
         non_penalties = torch.tensor(rule_model.get_penalty_batch(non_texts), device=device)
-        pref_rewards = torch.tanh(pref_penalties / 5.0)
-        non_rewards = torch.tanh(non_penalties / 5.0)
+        pref_penalties = torch.tanh(pref_penalties / 5.0)
+        non_penalties = torch.tanh(non_penalties / 5.0)
 
-    if torch.isnan(pref_rewards).any() or torch.isnan(non_rewards).any():
+    if torch.isnan(pref_penalties).any() or torch.isnan(non_penalties).any():
         print("警告：规则奖励包含NaN值")
-        pref_rewards = torch.zeros_like(pref_rewards, device=device)
-        non_rewards = torch.zeros_like(non_rewards, device=device)
+        pref_penalties = torch.zeros_like(pref_penalties, device=device)
+        non_penalties = torch.zeros_like(non_penalties, device=device)
 
     pref_ids = inputs["dpo_preferred_input_ids"].to(device)
     non_ids = inputs["dpo_non_preferred_input_ids"].to(device)
@@ -380,7 +380,7 @@ def penalty_based_dpo_loss(
         pref_lp_ref = get_sequence_log_probs(ref_pref, pref_labels)
         non_lp_ref = get_sequence_log_probs(ref_non, non_labels)
 
-    reward_diff = pref_rewards - non_rewards
+    reward_diff = pref_rewards - non_penalties
     reward_std = reward_diff.std()
     if reward_std < 1e-8:
         reward_diff = reward_diff / 1e-8
@@ -391,7 +391,7 @@ def penalty_based_dpo_loss(
         weights = torch.ones_like(reward_diff)
     else:
         weights = torch.softmax(
-            torch.clamp(reward_diff / (reward_temp + 1e-8), -10, 10),
+            torch.clamp(reward_diff / (penalty_temp + 1e-8), -10, 10),
             dim=0
         )
 
@@ -461,20 +461,21 @@ def penalty_based_wdoor_loss(
         non_texts.append(nonp)
 
     with torch.no_grad():
-        pref_rewards = torch.tensor(
+        pref_penalties = torch.tensor(
             rule_model.get_penalty_batch(pref_texts),
             device=device
         )
-        non_rewards = torch.tensor(
+        non_penalties = torch.tensor(
             rule_model.get_penalty_batch(non_texts),
             device=device
         )
-
-        # ✅ 修复：1 - sigmoid(rewards)
-        # safe 文本 reward≈0 → 1-sigmoid(0)=0.5 → 高权重，鼓励 safe
-        # unsafe 文本 reward≈-9 → 1-sigmoid(-9)≈1.0 → 极高权重，强烈惩罚
-        pref_weights = 1 - torch.sigmoid(pref_rewards)
-        non_weights = 1 - torch.sigmoid(non_rewards)
+        # safe 文本 penalty=0  → weight=1（高权重，鼓励 safe）
+        # unsafe 文本 penalty=-1 → weight=0（低权重）
+        pref_weights = 1 + pref_penalties
+        # NPO 项：unsafe 越不安全权重越高
+        # safe 文本 penalty=0  → weight=0
+        # unsafe 文本 penalty=-1 → weight=1（强烈惩罚）
+        non_weights = -non_penalties 
 
     pref_ids = inputs['dpo_preferred_input_ids'].to(device)
     non_ids = inputs['dpo_non_preferred_input_ids'].to(device)
@@ -494,9 +495,9 @@ def penalty_based_wdoor_loss(
 
     # ✅ 修复：GD 和 NPO 双目标均使用规则加权
     # GD：鼓励 safe response
-    gd_loss = (pref_weights * pref_lp).mean()
+    gd_loss = -(pref_weights * pref_lp).mean()
     # NPO：惩罚 unsafe response（原本用 logit 直接算，现在用规则加权）
-    npo_loss = -(non_weights * non_lp).mean()
+    npo_loss = (non_weights * non_lp).mean()
 
     wdoor_loss = gd_loss + npo_loss
 
@@ -568,14 +569,14 @@ class WDOORTrainer(Trainer):
 
 class PenaltyDPOTrainer(Trainer):
     def __init__(self, ref_model, rule_model: RulePenaltyModel, tokenizer, 
-                 beta=0.5, alpha=0.2, reward_temp=0.3, clip_magnitude=5.0, *args, **kwargs):
+                 beta=0.5, alpha=0.2, penalty_temp=0.3, clip_magnitude=5.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ref_model = ref_model
         self.rule_model = rule_model
         self.tokenizer = tokenizer
         self.beta = beta
         self.alpha = alpha
-        self.reward_temp = reward_temp
+        self.penalty_temp = penalty_temp
         self.clip_magnitude = clip_magnitude
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -584,7 +585,7 @@ class PenaltyDPOTrainer(Trainer):
             self.rule_model, self.tokenizer,
             beta=self.beta, 
             alpha=self.alpha,
-            reward_temp=self.reward_temp,
+            penalty_temp=self.penalty_temp,
             clip_magnitude=self.clip_magnitude
         )
         return (loss, None) if return_outputs else loss

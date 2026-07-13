@@ -3,9 +3,9 @@ from utils.custom_dataset import CustomDataset
 
 from utils.loss import (
     GATrainer, NPOTrainer, GDTrainer, DPOTrainer, 
-    DOORTrainer, WDOORTrainer, RuleDPOTrainer, RuleWDOORTrainer
+    DOORTrainer, WDOORTrainer, PenaltyDPOTrainer, PenaltyWDOORTrainer
 )  
-from utils.loss import RuleRewardModel
+from utils.loss import RulePenaltyModel
 import torch
 import argparse
 import warnings
@@ -30,17 +30,17 @@ parser.add_argument('--tau', type=float, default=5.0, help="WDOOR的tau参数（
 
 args = parser.parse_args()
 
-# ======================== 1. 加载规则奖励模型（仅规则蒸馏类型） ========================
+# ======================== 1. 加载规则惩罚模型（仅规则蒸馏类型） ========================
 rule_reward_model = None
 if args.type in [14, 15]:  # 14=规则WDOOR,15=规则DPO
     try:
-        rule_reward_model = RuleRewardModel(args.rule_model_path)
-        print(f"✅ 成功加载规则奖励模型: {args.rule_model_path}")
+        rule_reward_model = RulePenaltyModel(args.rule_model_path)
+        print(f"✅ 成功加载规则惩罚模型: {args.rule_model_path}")
 
     except Exception as e:
-        raise RuntimeError(f"❌ 规则奖励模型加载失败: {e}")
+        raise RuntimeError(f"❌ 规则惩罚模型加载失败: {e}")
 else:
-    print("ℹ️ 非规则增强训练类型，跳过规则奖励模型加载")
+    print("ℹ️ 非规则增强训练类型，跳过规则惩罚模型加载")
 
 # ======================== 2. 加载主模型和Tokenizer ========================
 model = AutoModelForCausalLM.from_pretrained(
@@ -250,9 +250,9 @@ elif args.type == 12:
         tau=args.tau
     )
 
-# 核心：规则奖励驱动的DPO模型（type=15）
+# 核心：规则惩罚驱动的DPO模型（type=15）
 elif args.type == 15:
-    trainer = RuleDPOTrainer(
+    trainer = PenaltyDPOTrainer(
         model=model,
         train_dataset=dataset,
         args=training_arguments,
@@ -264,9 +264,9 @@ elif args.type == 15:
         data_collator=data_collator
     )
 
-# 核心：规则奖励驱动的WDOOR模型（type=14）
+# 核心：规则惩罚驱动的WDOOR模型（type=14）
 elif args.type == 14:
-    trainer = RuleWDOORTrainer(
+    trainer = PenaltyWDOORTrainer(
         model=model,
         train_dataset=dataset,
         args=training_arguments,
@@ -287,8 +287,8 @@ else:
 train_type_desc = {
     9: "原DPO模型",
     12: "原WDOOR模型",
-    14: "规则奖励驱动的WDOOR模型",
-    15: "规则奖励驱动的DPO模型"
+    14: "规则惩罚励驱动的WDOOR模型",
+    15: "规则惩罚驱动的DPO模型"
 }.get(args.type, f"基础类型{args.type}")
 
 print(f"\n🚀 开始训练（类型: {args.type} | 训练目标: {train_type_desc}）")
