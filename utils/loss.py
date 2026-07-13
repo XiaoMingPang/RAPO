@@ -380,7 +380,7 @@ def penalty_based_dpo_loss(
         pref_lp_ref = get_sequence_log_probs(ref_pref, pref_labels)
         non_lp_ref = get_sequence_log_probs(ref_non, non_labels)
 
-    reward_diff = pref_rewards - non_penalties
+    reward_diff = pref_penalties - non_penalties
     reward_std = reward_diff.std()
     if reward_std < 1e-8:
         reward_diff = reward_diff / 1e-8
@@ -449,10 +449,14 @@ def penalty_based_wdoor_loss(
 
     pref_texts, non_texts = [], []
     for i in range(bs):
-        pref = tokenizer.decode(
-            inputs['dpo_preferred_input_ids'][i],
-            skip_special_tokens=True
-        ).split("### Assistant:")[-1].strip()
+#        pref = tokenizer.decode(
+#            inputs['dpo_preferred_input_ids'][i],
+#            skip_special_tokens=True
+#        ).split("### Assistant:")[-1].strip()
+        if "### Assistant:" in pref:
+            pref = pref.split("### Assistant:")[-1].strip()
+        elif "<start_of_turn>model" in pref:
+            pref = pref.split("<start_of_turn>model")[-1].replace("<end_of_turn>", "").strip()
         nonp = tokenizer.decode(
             inputs['dpo_non_preferred_input_ids'][i],
             skip_special_tokens=True
