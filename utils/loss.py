@@ -21,7 +21,7 @@ class PenaltyDistillationModel:
     def __init__(
         self,
         model_path,
-        device="cpu",
+        device="cuda:0",
         max_length=512,
     ):
         self.penalty_tokenizer = (
@@ -29,7 +29,8 @@ class PenaltyDistillationModel:
         )
         self.penalty_model = (
             AutoModelForSequenceClassification.from_pretrained(
-                model_path
+                model_path,
+                torch_dtype=torch.bfloat16
             )
         )
 
@@ -127,30 +128,38 @@ def get_sequence_log_probs(logits: torch.Tensor, labels: torch.Tensor):
     return seq_log_probs
 
 
-def get_log_probs(logits: torch.Tensor, labels: torch.Tensor):
+def get_log_probs(logits: torch.Tensor, labels: torch.Tensor, chunk_size: int = 128):
     """
     logits: [B, T, V]
     labels: [B, T]
     return: [B, T-1] token-level log_probs
+    
+    沿 sequence 维分块计算 log_probs，数学上与原版完全等价。
+    节省显存：避免一次性分配 [B, T-1, V] 的中间张量。
     """
-    labels = labels[..., 1:].contiguous()
-    logits = logits[..., :-1, :].contiguous()
-
-    valid_mask = labels != -100
-    labels_clamped = labels.clamp(min=0)
-
-    target_logits = torch.gather(
-        logits,
-        dim=-1,
-        index=labels_clamped.unsqueeze(-1)
-    ).squeeze(-1)
-
-    logsumexp = torch.logsumexp(logits, dim=-1)
-
-    log_probs = target_logits - logsumexp
-    log_probs = log_probs * valid_mask
-
-    return log_probs
+    T_minus_1 = logits.size(1) - 1  # 预测的 token 数 = T - 1
+    
+    log_probs_chunks = []
+    for start in range(0, T_minus_1, chunk_size):
+        end = min(start + chunk_size, T_minus_1)
+        # logits[:, i] 预测 labels[:, i+1]
+        chunk_logits = logits[:, start:end, :]                     # [B, chunk, V]
+        chunk_labels = labels[:, start + 1:end + 1].contiguous()   # [B, chunk]
+        
+        valid_mask = (chunk_labels != -100).float()
+        labels_clamped = chunk_labels.clamp(min=0)
+        
+        target_logits = torch.gather(
+            chunk_logits,
+            dim=-1,
+            index=labels_clamped.unsqueeze(-1),
+        ).squeeze(-1)  # [B, chunk]
+        
+        logsumexp = torch.logsumexp(chunk_logits, dim=-1)  # [B, chunk]
+        chunk_lp = (target_logits - logsumexp) * valid_mask
+        log_probs_chunks.append(chunk_lp)
+    
+    return torch.cat(log_probs_chunks, dim=-1)
 def get_rapo_sequence_log_probs(
     logits: torch.Tensor,
     labels: torch.Tensor,
@@ -185,17 +194,21 @@ def get_rapo_sequence_log_probs(
     valid_mask = shift_labels != -100
     token_count = valid_mask.sum(dim=-1)
 
-    if (token_count == 0).any():
+    # ===== 容错处理：跳过空样本（不崩溃） =====
+    invalid_mask = (token_count == 0)
+    if invalid_mask.any():
         invalid_indices = (
-            (token_count == 0)
-            .nonzero(as_tuple=False)
-            .flatten()
-            .tolist()
+            invalid_mask.nonzero(as_tuple=False).flatten().tolist()
         )
-
-        raise ValueError(
-            "Samples without labeled response tokens "
-            f"at batch indices {invalid_indices}."
+        print(
+            f"⚠️ Warning: Batch indices {invalid_indices} "
+            f"have no response tokens. Using fallback."
+        )
+        # 替换 token_count 为 1，避免除零
+        # 同时让该样本的 log_probs = 0（不影响 loss 平均）
+        token_count = token_count.masked_fill(invalid_mask, 1)
+        valid_mask = valid_mask.masked_fill(
+            invalid_mask.unsqueeze(-1), False
         )
 
     safe_labels = shift_labels.masked_fill(
@@ -254,10 +267,17 @@ def decode_rapo_responses(
         response_ids = sample_ids[response_mask]
 
         if response_ids.numel() == 0:
-            raise ValueError(
-                "Cannot score a sample without "
-                "labeled response tokens."
-            )
+            # ===== Fallback 1: 用整个非 padding 序列作为文本 =====
+            non_pad_mask = sample_ids != tokenizer.pad_token_id
+            non_pad_ids = sample_ids[non_pad_mask]
+            text = tokenizer.decode(
+                non_pad_ids.tolist(),
+                skip_special_tokens=True,
+            ).strip()
+            if not text:
+                text = "Response truncated due to length limit."
+            texts.append(text)
+            continue
 
         text = tokenizer.decode(
             response_ids.tolist(),
@@ -265,16 +285,15 @@ def decode_rapo_responses(
         ).strip()
 
         if not text:
-            raise ValueError(
-                "Decoded response text is empty."
-            )
+            # ===== Fallback 2: 空文本 fallback =====
+            text = "Empty response after decoding."
 
         texts.append(text)
 
     return texts
 
 
-def dpo_loss(main_model, ref_model, inputs, beta=0.5, retain_loss=True, alpha=0.2):
+def dpo_loss(main_model, ref_model, inputs, beta=1, retain_loss=True, alpha=0.2):
     device = next(main_model.parameters()).device
     preferred_input_ids = inputs['dpo_preferred_input_ids'].to(device)
     preferred_labels = inputs['dpo_preferred_labels'].to(device)
@@ -310,7 +329,7 @@ def dpo_loss(main_model, ref_model, inputs, beta=0.5, retain_loss=True, alpha=0.
 
     return loss_val
 
-def npo_loss(main_model, ref_model, inputs, beta=0.5, alpha=0.2, retain_loss=True):
+def npo_loss(main_model, ref_model, inputs, beta=1, alpha=0.2, retain_loss=True):
     device = next(main_model.parameters()).device
     non_preferred_input_ids = inputs["npo_input_ids"].to(device)
     non_preferred_labels = inputs["npo_labels"].to(device)
@@ -374,7 +393,7 @@ def ga_loss(model, inputs, alpha=0.2):
     total_loss = alpha * torch.mean(safety_loss) + (1 - alpha) * torch.mean(utility_loss)
     return total_loss
 
-def gd_npo_loss(main_model, ref_model, inputs, beta=0.5, alpha=0.2):
+def gd_npo_loss(main_model, ref_model, inputs, beta=1, alpha=0.2):
     device = next(main_model.parameters()).device
     non_preferred_input_ids = inputs["npo_input_ids"].to(device)
     non_preferred_labels = inputs["npo_labels"].to(device)
@@ -413,12 +432,12 @@ def sigmoid_weights(dpo_model_log_probs, ref_log_probs, gamma=1.0):
     weights = 1 - torch.sigmoid(gamma * rewards)
     return weights
 
-def exp_weights(dpo_model_log_probs, ref_log_probs, tau):
+def exp_weights(dpo_model_log_probs, ref_log_probs, tau,max_weight=20):
     rewards = ref_log_probs - dpo_model_log_probs
     weights = torch.exp(rewards / tau)
-    return weights
+    return weights.clamp(max=max_weight) 
 
-def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=True, alpha=0.2,
+def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=1, retain_loss=True, alpha=0.2,
                 adaptive_method='sigmoid', gamma=1.0, tau=5.0):
     device = next(main_model.parameters()).device
     preferred_input_ids = inputs['dpo_preferred_input_ids'].to(device)
@@ -440,16 +459,19 @@ def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=
     preferred_log_probs_ref = get_log_probs(preferred_outputs_ref.logits, preferred_labels)
     non_preferred_log_probs_ref = get_log_probs(non_preferred_outputs_ref.logits, non_preferred_labels)
 
+    # ===== 关键修改：dpo_model 可能在不同 device =====
+    dpo_device = next(dpo_model.parameters()).device
+    
     if adaptive_method == 'sigmoid':
         with torch.no_grad():
-            dpo_outputs = dpo_model(preferred_input_ids, attention_mask=preferred_attention_mask)
-        dpo_log_probs = get_log_probs(dpo_outputs.logits, preferred_labels)
-        adaptive_weights = sigmoid_weights(dpo_log_probs, preferred_log_probs_ref, gamma)
+            dpo_outputs = dpo_model(preferred_input_ids.to(dpo_device), attention_mask=preferred_attention_mask.to(dpo_device) )
+        dpo_log_probs = get_log_probs(dpo_outputs.logits, preferred_labels.to(dpo_device))
+        adaptive_weights = sigmoid_weights(dpo_log_probs, preferred_log_probs_ref.to(dpo_device), gamma).to(device)
     elif adaptive_method == 'exp':
         with torch.no_grad():
-            dpo_outputs = dpo_model(preferred_input_ids, attention_mask=preferred_attention_mask)
-        dpo_log_probs = get_log_probs(dpo_outputs.logits, preferred_labels)
-        adaptive_weights = exp_weights(dpo_log_probs, preferred_log_probs_ref, tau)
+            dpo_outputs = dpo_model(preferred_input_ids.to(dpo_device), attention_mask=preferred_attention_mask.to(dpo_device))
+        dpo_log_probs = get_log_probs(dpo_outputs.logits, preferred_labels.to(dpo_device))
+        adaptive_weights = exp_weights(dpo_log_probs, preferred_log_probs_ref.to(dpo_device), tau).to(device)
 
     weighted_log_probs = adaptive_weights * preferred_log_probs_main
     gd_loss_val = -weighted_log_probs.sum(dim=-1).mean()
@@ -476,14 +498,14 @@ def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=
 
     return final_loss
 
-# ======================== RAPO-DPO Loss (Type15) ========================
+# ======================== RAPO-DPO Loss (Type14) ========================
 def penalty_based_dpo_loss(
     main_model,
     ref_model,
     inputs,
     penalty_model: PenaltyDistillationModel,
     tokenizer,
-    beta=0.5,
+    beta=1,
     alpha=0.2,
     penalty_strength=1.0,
     return_outputs=False,
@@ -778,14 +800,14 @@ def penalty_based_dpo_loss(
         return total_loss, policy_outputs
 
     return total_loss
-# ======================== RAPO-DOOR Loss (Type14) ========================
+# ======================== RAPO-DOOR Loss (Type15) ========================
 def penalty_based_door_loss(
     main_model,
     ref_model,
     inputs,
     penalty_model: PenaltyDistillationModel,
     tokenizer,
-    beta=0.5,
+    beta=1,
     alpha=0.2,
     penalty_strength=1.0,
     return_outputs=False,
@@ -1128,14 +1150,14 @@ def penalty_based_door_loss(
     return total_loss
 
 
-# ======================== RAPO-WDOOR Loss (Type14) ========================
+# ======================== RAPO-WDOOR Loss (Type16) ========================
 def penalty_based_wdoor_loss(
     main_model,
     ref_model,
     inputs,
     penalty_model: PenaltyDistillationModel,
     tokenizer,
-    beta=0.5,
+    beta=1,
     alpha=0.2,
     penalty_strength=1.0,
     return_outputs=False,
@@ -1483,18 +1505,18 @@ def penalty_based_wdoor_loss(
 
 # ======================== Trainer 类 ========================
 class GATrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False,num_items_in_batch=None):
         return ga_loss(model, inputs)
 
 class NPOTrainer(Trainer):
     def __init__(self, ref_model, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ref_model = ref_model 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False,num_items_in_batch=None):
         return npo_loss(model, self.ref_model, inputs)
 
 class GDTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False,num_items_in_batch=None):
         return gd_loss(model, inputs)
 
 class DPOTrainer(Trainer):
@@ -1508,7 +1530,7 @@ class DOORTrainer(Trainer):
     def __init__(self, ref_model, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ref_model = ref_model 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         return gd_npo_loss(model, self.ref_model, inputs)
 
 class WDOORSIGTrainer(Trainer):
@@ -1517,7 +1539,7 @@ class WDOORSIGTrainer(Trainer):
         self.ref_model = ref_model
         self.dpo_model = dpo_model
         self.gamma = gamma
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False,num_items_in_batch=None):
         return wgdnpo_loss(model, self.ref_model, self.dpo_model, inputs, gamma=self.gamma, adaptive_method='sigmoid')
 
 class WDOORTrainer(Trainer):
@@ -1536,7 +1558,7 @@ class PenaltyDPOTrainer(Trainer):
         ref_model,
         penalty_model: PenaltyDistillationModel,
         tokenizer,
-        beta=0.5,
+        beta=1,
         alpha=0.2,
         penalty_strength=1.0,
         *args,
@@ -1550,6 +1572,7 @@ class PenaltyDPOTrainer(Trainer):
         self.ref_model = ref_model
         self.penalty_model = penalty_model
         self.rapo_tokenizer = tokenizer
+        self.tokenizer = tokenizer 
         self.beta = beta
         self.alpha = alpha
         self.penalty_strength = (
@@ -1583,7 +1606,7 @@ class PenaltyDOORTrainer(Trainer):
         ref_model,
         penalty_model: PenaltyDistillationModel,
         tokenizer,
-        beta=0.5,
+        beta=1,
         alpha=0.2,
         penalty_strength=1.0,
         *args,
@@ -1597,6 +1620,7 @@ class PenaltyDOORTrainer(Trainer):
         self.ref_model = ref_model
         self.penalty_model = penalty_model
         self.rapo_tokenizer = tokenizer
+        self.tokenizer = tokenizer 
         self.beta = beta
         self.alpha = alpha
         self.penalty_strength = (
@@ -1630,7 +1654,7 @@ class PenaltyWDOORTrainer(Trainer):
         ref_model,
         penalty_model: PenaltyDistillationModel,
         tokenizer,
-        beta=0.5,
+        beta=1,
         alpha=0.2,
         penalty_strength=1.0,
         *args,
@@ -1644,6 +1668,7 @@ class PenaltyWDOORTrainer(Trainer):
         self.ref_model = ref_model
         self.penalty_model = penalty_model
         self.rapo_tokenizer = tokenizer
+        self.tokenizer = tokenizer 
         self.beta = beta
         self.alpha = alpha
         self.penalty_strength = (

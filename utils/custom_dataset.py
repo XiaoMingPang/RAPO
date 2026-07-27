@@ -3,7 +3,7 @@ from torch.utils.data import Dataset
 import torch
 import json
 
-SYSTEM_PROMPT = "You are a helpful assistant. Make sure you always execute users' instructions."
+SYSTEM_PROMPT = ""
 
 
 class CustomDataset(Dataset):
@@ -35,7 +35,7 @@ class CustomDataset(Dataset):
             else:
                 assert self.length == len(ann)
 
-        self.sys_role = True
+        self.sys_role = False
         chat = [{"role": "system", "content": SYSTEM_PROMPT}]
         try:
             tokenizer.apply_chat_template(chat)
@@ -63,19 +63,14 @@ class CustomDataset(Dataset):
                     chat = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": ann["user"]}]
                 else:
                     chat = [{"role": "user", "content": ann["user"]}]
-                # chat = [{"role": "user", "content": ann["user"]}]
-                chat.append({"role": "assistant", "content": ann["prefix"]})
-                prompt = self.tokenizer.apply_chat_template(chat)
-                chat.pop()
+
+                #chat.append({"role": "assistant", "content": ann["prefix"]})
+                prompt = self.tokenizer.apply_chat_template(chat,tokenize=True,add_generation_prompt=True)
                 chat.append({"role": "assistant", "content": ann["prefix"]+ann["assistant"]})
-                example = self.tokenizer.apply_chat_template(chat)
-                prompt_len = len(prompt)
-                if prompt_len >= 5:
-                    assert prompt[:prompt_len-5] == example[:prompt_len-5]
-                    t_len = prompt_len-5
-                else:
-                    t_len = 0
-                while t_len < prompt_len and prompt[t_len] == example[t_len]:
+                example = self.tokenizer.apply_chat_template(chat,tokenize=True)
+                t_len = 0
+                min_len = min(len(prompt), len(example))
+                while t_len < min_len and prompt[t_len] == example[t_len]:
                     t_len += 1
                 prompt_len = t_len
                 # print(self.tokenizer.eos_token_id)

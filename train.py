@@ -3,54 +3,77 @@ from utils.custom_dataset import CustomDataset
 
 from utils.loss import (
     GATrainer, NPOTrainer, GDTrainer, DPOTrainer, 
-    DOORTrainer, WDOORTrainer, PenaltyDPOTrainer, PenaltyWDOORTrainer
+    DOORTrainer, WDOORTrainer, 
+    PenaltyDPOTrainer, PenaltyDOORTrainer, PenaltyWDOORTrainer,
+    PenaltyDistillationModel,
 )  
-from utils.loss import RulePenaltyModel
+
+
 import torch
 import argparse
 import warnings
 import json  
+
+from transformers import BitsAndBytesConfig
+bnb_4bit = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+)
 warnings.filterwarnings("ignore")
 
 parser = argparse.ArgumentParser(description='train')
 parser.add_argument('--base_model', type=str, default="./gemma-2-2b-it")
 parser.add_argument('--dataset_model_name', type=str, default="gemma-2-2b-it")  
 parser.add_argument('--output_dir', type=str, default="output_model")
-# 扩展type类型：9=原DPO,12=原WDOOR,15=规则蒸馏DPO,14=规则蒸馏WDOOR
-parser.add_argument('--type', type=int, default=1, 
-                    help="训练类型：9=原DPO | 12=原WDOOR | 15=规则蒸馏DPO | 14=规则蒸馏WDOOR")
-# 规则模型路径（仅规则蒸馏类型需要）
-parser.add_argument('--rule_model_path', type=str, default="./rule_reward_model/final_model/")
+parser.add_argument(
+    "--penalty_strength",
+    type=float,
+    default=1.0,
+)
+# 训练类型：9=原DPO | 12=原WDOOR | 14=RAPO-DPO | 15=RAPO-DOOR | 16=RAPO-WDOOR
+parser.add_argument('--type', type=int, default=14,
+                    help="训练类型：9=原DPO | 12=原WDOOR | 14=RAPO-DPO | 15=RAPO-DOOR | 16=RAPO-WDOOR")
+# 规则模型路径（仅 RAPO 类型需要）
+parser.add_argument('--rule_model_path', type=str, default="./rule_penalty_model/final_model/")
+# RAPO 专用：规则模型最大编码长度
+parser.add_argument('--penalty_max_length', type=int, default=512,
+                    help="PenaltyDistillationModel 的最大序列长度")
+parser.add_argument('--penalty_device', type=str, default="cuda:0",
+                    help="PenaltyDistillationModel 所在设备")
 
-# DPO/WDOOR核心参数（全局默认值）
-parser.add_argument('--beta', type=float, default=0.5, help="DPO/WDOOR温度系数")
-parser.add_argument('--alpha', type=float, default=0.2, help="主损失与保留损失的权重比")
-# WDOOR专属参数
-parser.add_argument('--tau', type=float, default=5.0, help="WDOOR的tau参数（默认5.0）")
 
 args = parser.parse_args()
 
-# ======================== 1. 加载规则惩罚模型（仅规则蒸馏类型） ========================
-rule_reward_model = None
-if args.type in [14, 15]:  # 14=规则WDOOR,15=规则DPO
+# ======================== 1. 加载规则惩罚模型（仅 RAPO 类型） ========================
+penalty_model = None
+if args.type in [14, 15, 16]:
     try:
-        rule_reward_model = RulePenaltyModel(args.rule_model_path)
-        print(f"✅ 成功加载规则惩罚模型: {args.rule_model_path}")
-
+        penalty_model = PenaltyDistillationModel(
+            model_path=args.rule_model_path,
+            device=args.penalty_device,
+            max_length=args.penalty_max_length,
+        )
+        print(f"✅ 成功加载规则惩罚模型: {args.rule_model_path} "
+              f"(device={args.penalty_device}, max_length={args.penalty_max_length})")
     except Exception as e:
         raise RuntimeError(f"❌ 规则惩罚模型加载失败: {e}")
 else:
-    print("ℹ️ 非规则增强训练类型，跳过规则惩罚模型加载")
+    print("ℹ️ 非 RAPO 训练类型，跳过规则惩罚模型加载")
 
 # ======================== 2. 加载主模型和Tokenizer ========================
 model = AutoModelForCausalLM.from_pretrained(
     args.base_model,
     torch_dtype=torch.bfloat16,
     trust_remote_code=True,
-    device_map='cuda:0'
+    device_map={"": "cuda:0"}
 )
 
 model.config.use_cache = False
+model.gradient_checkpointing_enable(
+    gradient_checkpointing_kwargs={"use_reentrant": False}
+)
 # Tokenizer配置（Gemma专属）
 tokenizer = AutoTokenizer.from_pretrained(args.base_model)
 if tokenizer.pad_token is None:
@@ -60,15 +83,16 @@ tokenizer.truncation_side = "right"
 
 # ======================== 3. 加载参考模型（Ref Model） ========================
 ref_model = None
-dpo_model = None  # WDOOR专用的预训练DPO模型
-# 需要参考模型的类型：原DPO(9)/原WDOOR(12)/规则DPO(15)/规则WDOOR(14)
-if args.type in [9, 12, 14, 15]:  
+dpo_model = None  
+
+if args.type in [4,5,7,9, 10,12, 14, 15, 16]:
     ref_model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         torch_dtype=torch.bfloat16,
-        device_map='cuda:0',
+        device_map={"": "cuda:0"},
         trust_remote_code=True,
-        load_in_8bit=True
+#        load_in_8bit=True,
+        quantization_config=bnb_4bit
     )
     ref_model.eval()
     for param in ref_model.parameters():
@@ -76,14 +100,16 @@ if args.type in [9, 12, 14, 15]:
     print("✅ 参考模型加载完成（梯度已冻结）")
 
 # ======================== 4. 加载WDOOR专用的DPO模型（仅原WDOOR需要） ========================
-if args.type == 12:  # 仅原WDOOR(12)需要，规则WDOOR(14)不需要
+if args.type == 12:   # 仅原 WDOOR(12) 需要，RAPO 系列不需要
     try:
         dpo_name = f"./output_model/dpo_model/{args.dataset_model_name}/9"  # 动态适配模型名
         dpo_model = AutoModelForCausalLM.from_pretrained(
             dpo_name,
             torch_dtype=torch.bfloat16,
-            device_map='cuda:0',
-            trust_remote_code=True
+            device_map={"": "cuda:0"},
+            trust_remote_code=True,
+#            load_in_8bit=True
+            quantization_config=bnb_4bit,
         )
         dpo_model.eval()
         for param in dpo_model.parameters():
@@ -91,20 +117,13 @@ if args.type == 12:  # 仅原WDOOR(12)需要，规则WDOOR(14)不需要
         print(f"✅ WDOOR专用DPO模型加载完成: {dpo_name}")
     except Exception as e:
         raise RuntimeError(f"❌ WDOOR专用DPO模型加载失败: {e}")
-elif args.type == 14:
-    print("ℹ️ 规则WDOOR模型无需加载预训练DPO模型")
+elif args.type in [14, 15, 16]:
+    print("ℹ️ RAPO 系列无需加载预训练 DPO 模型")
 
 # ======================== 5. 数据集配置（四类模型共用统一格式） ========================
 train_dataset_dict = {}
-# 原DPO(9)/规则DPO(15)：使用prefix-good/bad（增强版）
-if args.type in [9, 15]:
-    train_dataset_dict = {
-        "dpo_preferred_": (f"./dataset/prefix/{args.dataset_model_name}-prefix-good.jsonl", True),
-        "dpo_non_preferred_": (f"./dataset/prefix/{args.dataset_model_name}-prefix-bad.jsonl", True),
-        "utility_": ("./dataset/train/alpaca_cleaned.jsonl", False)
-    }
-# 原WDOOR(12)/规则WDOOR(14)：与原DPO共用数据集
-elif args.type in [12, 14]:
+# RAPO 系列（14/15/16）和 原 DPO/WDOOR（9/12）使用同一份 preference + utility 数据
+if args.type in [9, 12, 14, 15, 16]:
     train_dataset_dict = {
         "dpo_preferred_": (f"./dataset/prefix/{args.dataset_model_name}-prefix-good.jsonl", True),
         "dpo_non_preferred_": (f"./dataset/prefix/{args.dataset_model_name}-prefix-bad.jsonl", True),
@@ -178,11 +197,11 @@ def data_collator(batch_list):
 # ======================== 7. 训练参数配置 ========================
 training_arguments = TrainingArguments(
     output_dir=f"{args.output_dir}/{args.dataset_model_name}-200/{args.type}-checkpoint",
-    num_train_epochs=10,
+    num_train_epochs=4,
     per_device_train_batch_size=2,
     gradient_accumulation_steps=1,
     optim="paged_adamw_8bit",
-    learning_rate=1e-5,
+    learning_rate=5e-6,
     logging_steps=1,
     logging_strategy="steps",
     save_strategy="epoch",
@@ -195,6 +214,7 @@ training_arguments = TrainingArguments(
     log_level="error",
     dataloader_pin_memory=False,
     max_grad_norm=1.0, 
+    warmup_ratio=0.1
 )
 
 # ======================== 8. Trainer选择逻辑（核心：4类模型） ========================
@@ -235,7 +255,8 @@ elif args.type == 9:
         train_dataset=dataset,
         args=training_arguments,
         ref_model=ref_model,
-        data_collator=data_collator
+        data_collator=data_collator,
+        tokenizer=tokenizer
     )
 
 # 核心：原WDOOR模型（type=12）
@@ -247,49 +268,70 @@ elif args.type == 12:
         ref_model=ref_model,
         dpo_model=dpo_model,
         data_collator=data_collator,
-        tau=args.tau
+        tau=5.0,
+        tokenizer=tokenizer
     )
 
-# 核心：规则惩罚驱动的DPO模型（type=15）
-elif args.type == 15:
+# RAPO-DPO（type=14）
+elif args.type == 14:
     trainer = PenaltyDPOTrainer(
         model=model,
         train_dataset=dataset,
         args=training_arguments,
         ref_model=ref_model,
-        rule_model=rule_reward_model,
-        tokenizer=tokenizer,  
-        beta=args.beta,
-        alpha=args.alpha,
+        penalty_model=penalty_model,
+        tokenizer=tokenizer,
+        beta=0.5,
+        alpha=0.2,
+        penalty_strength=args.penalty_strength,
+        data_collator=data_collator,
+    )
+# RAPO-DOOR（type=15）
+elif args.type == 15:
+    trainer = PenaltyDOORTrainer(
+        model=model,
+        train_dataset=dataset,
+        args=training_arguments,
+        ref_model=ref_model,
+        penalty_model=penalty_model,
+        tokenizer=tokenizer,
+        beta=0.5,
+        alpha=0.2,
+        penalty_strength=args.penalty_strength,
         data_collator=data_collator
     )
-
-# 核心：规则惩罚驱动的WDOOR模型（type=14）
-elif args.type == 14:
+    
+# RAPO-WDOOR（type=16）
+elif args.type == 16:
     trainer = PenaltyWDOORTrainer(
         model=model,
         train_dataset=dataset,
         args=training_arguments,
         ref_model=ref_model,
-        rule_model=rule_reward_model,
+        penalty_model=penalty_model,
         tokenizer=tokenizer,
-        beta=1.0,      # 固定
-        alpha=args.alpha,
+        beta=0.5,
+        alpha=0.2,
+        penalty_strength=args.penalty_strength,
         data_collator=data_collator
     )
 
 
 else:
-    raise ValueError(f"❌ 不支持的训练类型: {args.type}（核心支持：9=原DPO | 12=原WDOOR | 15=规则DPO | 14=规则WDOOR）")
+    raise ValueError(
+        f"❌ 不支持的训练类型: {args.type} "
+        f"（支持：9=原DPO | 12=原WDOOR | 14=RAPO-DPO | 15=RAPO-DOOR | 16=RAPO-WDOOR）"
+    )
 
 # ======================== 9. 开始训练 ========================
 # 打印训练信息（区分四类模型）
 train_type_desc = {
-    9: "原DPO模型",
-    12: "原WDOOR模型",
-    14: "规则惩罚励驱动的WDOOR模型",
-    15: "规则惩罚驱动的DPO模型"
-}.get(args.type, f"基础类型{args.type}")
+    9: "原 DPO 模型",
+    12: "原 WDOOR 模型",
+    14: "RAPO-DPO 模型",
+    15: "RAPO-DOOR 模型",
+    16: "RAPO-WDOOR 模型",
+}.get(args.type, f"基础类型 {args.type}")
 
 print(f"\n🚀 开始训练（类型: {args.type} | 训练目标: {train_type_desc}）")
 print(f"📁 输出目录: {training_arguments.output_dir}")
@@ -305,14 +347,17 @@ with open(f"{final_output_dir}/training_args.json", "w") as f:
     f.write(training_arguments.to_json_string())
 print(f"✅ 训练参数已保存至: {final_output_dir}/training_args.json")
 
-# 保存规则相关参数（仅规则蒸馏类型）
-if args.type in [14, 15]:
+# 保存 RAPO 相关参数（仅 RAPO 类型）
+if args.type in [14, 15, 16]:
     rule_args = {
+        "type": args.type,
         "rule_model_path": args.rule_model_path,
-        "beta": args.beta,
-        "alpha": args.alpha,
-        "tau": args.tau if args.type ==14 else None
+        "penalty_strength": args.penalty_strength,
+        "penalty_max_length": args.penalty_max_length,
+        "penalty_device": args.penalty_device,
+        "beta": 0.5,
+        "alpha": 0.2,
     }
     with open(f"{final_output_dir}/rule_args.json", "w") as f:
-        json.dump(rule_args, f, indent=4)
-    print(f"✅ 规则参数已保存至: {final_output_dir}/rule_args.json")
+        json.dump(rule_args, f, indent=4, ensure_ascii=False)
+    print(f"✅ RAPO 参数已保存至: {final_output_dir}/rule_args.json")
