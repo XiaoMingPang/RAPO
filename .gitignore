@@ -3,7 +3,9 @@ output_model/
 rule_penalty_model*/
 */final_model/
 */checkpoint-*/
-
+distilbert-base-uncased/
+gemma-2-2b-it/
+responses/
 # 训练数据（绝对不能进 git）
 dataset/distill/
 datasets/
