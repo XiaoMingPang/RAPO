@@ -115,18 +115,25 @@ class PenaltyDistillationModel:
 def get_batch_loss(output, labels):
     return -get_log_probs(output, labels)
 
+#def get_sequence_log_probs(logits: torch.Tensor, labels: torch.Tensor):
+#    """
+#    return: [B] mean log-prob per valid token
+#    """
+#    token_log_probs = get_log_probs(logits, labels)
+#
+#    valid_mask = (labels[..., 1:] != -100).float()
+#    token_count = valid_mask.sum(dim=-1).clamp_min(1.0)
+#
+#    seq_log_probs = token_log_probs.sum(dim=-1) / token_count
+#    return seq_log_probs
 def get_sequence_log_probs(logits: torch.Tensor, labels: torch.Tensor):
-    """
-    return: [B] mean log-prob per valid token
-    """
-    token_log_probs = get_log_probs(logits, labels)
-
-    valid_mask = (labels[..., 1:] != -100).float()
-    token_count = valid_mask.sum(dim=-1).clamp_min(1.0)
-
-    seq_log_probs = token_log_probs.sum(dim=-1) / token_count
-    return seq_log_probs
-
+    shifted_labels = labels[..., 1:].contiguous()
+    logits = logits[..., :-1, :].contiguous()
+    loss_function = nn.CrossEntropyLoss(ignore_index=-100, reduction='none')
+    log_probs = -loss_function(logits.transpose(-1, -2), shifted_labels)
+    sequence_log_probs = log_probs.sum(dim=-1)
+    return sequence_log_probs
+    
 
 def get_log_probs(logits: torch.Tensor, labels: torch.Tensor, chunk_size: int = 128):
     """
@@ -293,7 +300,7 @@ def decode_rapo_responses(
     return texts
 
 
-def dpo_loss(main_model, ref_model, inputs, beta=1, retain_loss=True, alpha=0.2):
+def dpo_loss(main_model, ref_model, inputs, beta=0.5, retain_loss=True, alpha=0.2):
     device = next(main_model.parameters()).device
     preferred_input_ids = inputs['dpo_preferred_input_ids'].to(device)
     preferred_labels = inputs['dpo_preferred_labels'].to(device)
@@ -329,7 +336,7 @@ def dpo_loss(main_model, ref_model, inputs, beta=1, retain_loss=True, alpha=0.2)
 
     return loss_val
 
-def npo_loss(main_model, ref_model, inputs, beta=1, alpha=0.2, retain_loss=True):
+def npo_loss(main_model, ref_model, inputs, beta=0.5, alpha=0.2, retain_loss=True):
     device = next(main_model.parameters()).device
     non_preferred_input_ids = inputs["npo_input_ids"].to(device)
     non_preferred_labels = inputs["npo_labels"].to(device)
@@ -393,7 +400,7 @@ def ga_loss(model, inputs, alpha=0.2):
     total_loss = alpha * torch.mean(safety_loss) + (1 - alpha) * torch.mean(utility_loss)
     return total_loss
 
-def gd_npo_loss(main_model, ref_model, inputs, beta=1, alpha=0.2):
+def gd_npo_loss(main_model, ref_model, inputs, beta=0.5, alpha=0.2):
     device = next(main_model.parameters()).device
     non_preferred_input_ids = inputs["npo_input_ids"].to(device)
     non_preferred_labels = inputs["npo_labels"].to(device)
@@ -437,7 +444,7 @@ def exp_weights(dpo_model_log_probs, ref_log_probs, tau,max_weight=20):
     weights = torch.exp(rewards / tau)
     return weights.clamp(max=max_weight) 
 
-def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=1, retain_loss=True, alpha=0.2,
+def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=True, alpha=0.2,
                 adaptive_method='sigmoid', gamma=1.0, tau=5.0):
     device = next(main_model.parameters()).device
     preferred_input_ids = inputs['dpo_preferred_input_ids'].to(device)
@@ -459,7 +466,6 @@ def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=1, retain_loss=Tr
     preferred_log_probs_ref = get_log_probs(preferred_outputs_ref.logits, preferred_labels)
     non_preferred_log_probs_ref = get_log_probs(non_preferred_outputs_ref.logits, non_preferred_labels)
 
-    # ===== 关键修改：dpo_model 可能在不同 device =====
     dpo_device = next(dpo_model.parameters()).device
     
     if adaptive_method == 'sigmoid':
@@ -505,7 +511,7 @@ def penalty_based_dpo_loss(
     inputs,
     penalty_model: PenaltyDistillationModel,
     tokenizer,
-    beta=1,
+    beta=0.5,
     alpha=0.2,
     penalty_strength=1.0,
     return_outputs=False,
@@ -807,7 +813,7 @@ def penalty_based_door_loss(
     inputs,
     penalty_model: PenaltyDistillationModel,
     tokenizer,
-    beta=1,
+    beta=0.5,
     alpha=0.2,
     penalty_strength=1.0,
     return_outputs=False,
@@ -1157,7 +1163,7 @@ def penalty_based_wdoor_loss(
     inputs,
     penalty_model: PenaltyDistillationModel,
     tokenizer,
-    beta=1,
+    beta=0.5,
     alpha=0.2,
     penalty_strength=1.0,
     return_outputs=False,
@@ -1558,7 +1564,7 @@ class PenaltyDPOTrainer(Trainer):
         ref_model,
         penalty_model: PenaltyDistillationModel,
         tokenizer,
-        beta=1,
+        beta=0.5,
         alpha=0.2,
         penalty_strength=1.0,
         *args,
@@ -1606,7 +1612,7 @@ class PenaltyDOORTrainer(Trainer):
         ref_model,
         penalty_model: PenaltyDistillationModel,
         tokenizer,
-        beta=1,
+        beta=0.5,
         alpha=0.2,
         penalty_strength=1.0,
         *args,
@@ -1654,7 +1660,7 @@ class PenaltyWDOORTrainer(Trainer):
         ref_model,
         penalty_model: PenaltyDistillationModel,
         tokenizer,
-        beta=1,
+        beta=0.5,
         alpha=0.2,
         penalty_strength=1.0,
         *args,

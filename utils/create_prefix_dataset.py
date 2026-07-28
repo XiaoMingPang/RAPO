@@ -3,9 +3,9 @@ import sys
 from transformers import AutoTokenizer
 import numpy as np
 
-zeros = np.zeros(200, dtype=int)
-random_integers = np.random.randint(1, 101, size=200)
-combined_k = np.concatenate((zeros, random_integers))
+#zeros = np.zeros(200, dtype=int)
+#random_integers = np.random.randint(1, 101, size=200)
+combined_k = np.random.randint(1, 257, size=400).tolist()#改动
 np.random.shuffle(combined_k)
 combined_k = combined_k.tolist()
 
@@ -38,8 +38,20 @@ bad_ans = []
 for i, item in enumerate(bad_data):
     bad_msg = item["messages"][1]["content"]
     k = combined_k[i]
-    bad_tokens = tokenizer.tokenize(bad_msg)[:k]
-    first_k_tokens_len = len(tokenizer.convert_tokens_to_string(bad_tokens))
+#    bad_tokens = tokenizer.tokenize(bad_msg)[:k]
+#    first_k_tokens_len = len(tokenizer.convert_tokens_to_string(bad_tokens))
+#    new_prompt = item["messages"][0]["content"]+bad_msg[:first_k_tokens_len]
+#    new_bad_msg = bad_msg[first_k_tokens_len:]
+# ===== 改动：用 token-id 切分，保证 round-trip 一致 =====
+    all_ids = tokenizer.encode(bad_msg, add_special_tokens=False)
+    prefix_ids = all_ids[:k]
+    suffix_ids = all_ids[k:]
+    prefix_str = tokenizer.decode(prefix_ids, skip_special_tokens=False)
+    suffix_str = tokenizer.decode(suffix_ids, skip_special_tokens=False)
+    
+    
+    if len(ids) == 0:
+        first_k_tokens_len = 0
     new_prompt = item["messages"][0]["content"]+bad_msg[:first_k_tokens_len]
     new_bad_msg = bad_msg[first_k_tokens_len:]
     bad_ans.append({
