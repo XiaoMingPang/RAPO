@@ -19,7 +19,7 @@ def load_model_and_tokenizer(model_path, dtype=torch.bfloat16, max_memory=None):
     tokenizer.padding_side = "left"
 
     kwargs = dict(
-        torch_dtype=dtype,
+        dtype=dtype,
         device_map="auto",
         trust_remote_code=True,
     )
@@ -105,9 +105,11 @@ def _slice_outputs(outputs, input_ids):
 
 
 def generate_general_responses(model, tokenizer, conversations, args):
-    all_inputs = [conv[0]['content'] for conv in conversations]
-    all_decoded_outputs = []
-    all_decoded_inputs = []
+#    all_inputs = [conv[0]['content'] for conv in conversations]
+#    all_decoded_outputs = []
+#    all_decoded_inputs = []
+    all_inputs_text = [conv[0]["content"] for conv in conversations]
+    all_outputs_text = []
     model_max_length = getattr(model.config, 'max_position_embeddings', 4096)
     max_new_tokens = 512
     for i in tqdm(range(0, len(conversations), args.batch_size), desc="Generating General Responses"):
@@ -246,11 +248,11 @@ def save_name_for(model_path):
     former_dir = os.path.basename(os.path.dirname(model_path)) or "exp"
     return f"{former_dir}_{save_name}"
 
-def process_general_responses(model, tokenizer, args, model_path):
+def process_general_responses(model, tokenizer, args):
     conversations = load_conversations(args.eval_path)
     output_data = generate_general_responses(model, tokenizer, conversations, args)
     output_file = os.path.join(
-        args.output_dir, f"{save_name_for(model_path)}_oversafe.json"
+        args.output_dir, f"{save_name_for(args.model_path)}_oversafe.json",
     )
     save_output(output_data, output_file)
     print(f"General responses saved to {output_file}")
@@ -336,7 +338,7 @@ def process_multi_turn_responses(model, tokenizer, args):
     conversations = load_multi_turn_conversations(args.eval_path)
     output_data = generate_multi_turn_responses(model, tokenizer, conversations, args)
     output_file = os.path.join(
-        args.output_dir, f"{save_name_for(model_path)}_multi_turn.json"
+        args.output_dir, f"{save_name_for(args.model_path)}_multi_turn.json"
     )
     save_output(output_data, output_file)
     print(f"Multi-turn responses saved to {output_file}")
