@@ -245,7 +245,6 @@ def get_rapo_sequence_log_probs(
 
     sequence_log_probs = (
         token_log_probs.sum(dim=-1)
-        / token_count.to(token_log_probs.dtype)
     )
 
     return sequence_log_probs
