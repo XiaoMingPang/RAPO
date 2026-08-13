@@ -347,7 +347,7 @@ def process_harmbench_responses(model, tokenizer, args):
     conversations = load_harmbench_conversations(args.eval_path)
     output_data = generate_harmbench_responses(model, tokenizer, conversations, args)
     output_file = os.path.join(
-        args.output_dir, f"{save_name_for(model_path)}_harmbench.json"
+        args.output_dir, f"{save_name_for(args.model_path)}_harmbench.json"
     )
     save_output(output_data, output_file)
     print(f"Harmbench responses saved to {output_file}")

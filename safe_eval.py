@@ -19,7 +19,9 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     print("Please set the OPENAI_API_KEY environment variable.", file=sys.stderr)
     sys.exit(1)
-
+    
+CLOUDFLARE_GATEWAY_URL ="https://gateway.ai.cloudflare.com/v1/ee133e36256bd5e3f9b85fe23d6737e4/xiaoming-google-open-ai-gpt-4o-mini/openai"
+Base_URL= "https://openrouter.ai/api/v1"
 # Timeit
 def timeit(desc=""):
     def decorator(func):
@@ -43,6 +45,7 @@ async def batch_query(async_client: AsyncOpenAI, messages_lst: List[dict], batch
         batch = messages_lst[i : i + batch_size]
         tasks = [async_client.chat.completions.create(model=model, messages=m) for m in batch]
         responses.extend(await asyncio.gather(*tasks))
+        await asyncio.sleep(10)
     return responses
 
 # ---------------------- KL Eval ----------------------
@@ -113,8 +116,8 @@ async def evaluate_with_openai_harmbench(data: List[Dict], output_prefix: str, b
         generation = item.get('response_generated', '')
         prompt = make_harmbench_eval_prompt(behavior, generation)
         openai_prompt_list.append([{"role": "user", "content": prompt}])
-    model_name = "gpt-4o-mini"
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    model_name = "openai/gpt-4o-mini"
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=Base_URL)
     print("Running OPENAI Eval...")
     responses = await batch_query(client, openai_prompt_list, batch_size, model_name)
     new_data = []
@@ -146,8 +149,8 @@ async def evaluate_with_openai_multi_turn(data: List[Dict], output_prefix: str, 
         generation = item.get('response_generated', '')
         prompt = make_prompt_multi_turn(generation, objective)
         openai_prompt_list.append([{"role": "user", "content": prompt}])
-    model_name = "gpt-4o-mini"
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    model_name = "openai/gpt-4o-mini"
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=Base_URL)
     print("Running OPENAI Eval...")
     responses = await batch_query(client, openai_prompt_list, batch_size, model_name)
     new_data = []
@@ -177,8 +180,8 @@ async def evaluate_prefill_eval(data: List[Dict], output_prefix: str, batch_size
     for item in tqdm(data, desc="Preparing Prefill prompts"):
         prompt = make_prompt(item.get('intent', ''), item.get('response_generated', ''))
         openai_prompt_list.append([{"role": "user", "content": prompt}])
-    model_name = "gpt-4o-mini"
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    model_name = "openai/gpt-4o-mini"
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=Base_URL)
     print("Running OPENAI Eval...")
     responses = await batch_query(client, openai_prompt_list, batch_size, model_name)
     new_data = []
