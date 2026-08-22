@@ -197,11 +197,12 @@ def data_collator(batch_list):
 # ======================== 7. 训练参数配置 ========================
 training_arguments = TrainingArguments(
     output_dir=f"{args.output_dir}/{args.dataset_model_name}-200/{args.type}-checkpoint",
-    num_train_epochs=4,
+    num_train_epochs=10,
+    #原来的epoch为4
     per_device_train_batch_size=2,
     gradient_accumulation_steps=1,
     optim="paged_adamw_8bit",
-    learning_rate=5e-6,
+    learning_rate=1e-5,
     logging_steps=1,
     logging_strategy="steps",
     save_strategy="epoch",

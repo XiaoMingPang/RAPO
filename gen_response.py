@@ -270,17 +270,21 @@ def generate_prefill_responses(model, tokenizer, input_data, args):
     max_new_tokens = 256
 
     for prefill_len in args.prefill_lengths:
-        print(f"Generating with prefill length: {prefill_len} words")
+        print(f"Generating with prefill length: {prefill_len} tokens")
         all_decoded_outputs, all_prefills, all_inputs = [], [], []
         conversations = []
 
         for entry in input_data:
             question = entry["messages"][0]["content"]
             response = entry["messages"][1]["content"]
-            words = response.split(" ", 1)
-            prefill_text = words[0] if prefill_len >= 1 else ""
-            if prefill_len > 1 and len(words) > 1:
-                prefill_text = " ".join(response.split()[:prefill_len])
+            response_tokens = tokenizer.tokenize(response)
+            prefill_tokens = response_tokens[:prefill_len]
+            prefill_text = tokenizer.decode(
+                tokenizer.convert_tokens_to_ids(prefill_tokens),
+                skip_special_tokens=True
+            )
+            if not prefill_text.strip():
+                prefill_text = ""
 
             all_prefills.append(prefill_text)
             all_inputs.append(question)
