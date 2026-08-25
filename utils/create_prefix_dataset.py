@@ -3,9 +3,10 @@ import sys
 from transformers import AutoTokenizer
 import numpy as np
 
-#zeros = np.zeros(200, dtype=int)
-#random_integers = np.random.randint(1, 101, size=200)
-combined_k = np.random.randint(1, 257, size=400).tolist()#改动
+# [RAPO-FIX-EXTRA] 修复原脚本的 NameError（ids / first_k_tokens_len 未定义）
+# 与越界问题（k 可能超过 bad_msg 的 token 数导致续写为空），
+# 统一用 token-id 切分（prefix_ids + suffix_ids = all_ids，保证 round-trip）。
+combined_k = np.random.randint(1, 257, size=400).tolist()
 np.random.shuffle(combined_k)
 combined_k = combined_k.tolist()
 
@@ -37,36 +38,30 @@ bad_ans = []
 
 for i, item in enumerate(bad_data):
     bad_msg = item["messages"][1]["content"]
+    user_msg = item["messages"][0]["content"]
     k = combined_k[i]
-#    bad_tokens = tokenizer.tokenize(bad_msg)[:k]
-#    first_k_tokens_len = len(tokenizer.convert_tokens_to_string(bad_tokens))
-#    new_prompt = item["messages"][0]["content"]+bad_msg[:first_k_tokens_len]
-#    new_bad_msg = bad_msg[first_k_tokens_len:]
-# ===== 改动：用 token-id 切分，保证 round-trip 一致 =====
+
     all_ids = tokenizer.encode(bad_msg, add_special_tokens=False)
+    # 越界保护：前缀最多切到 len(all_ids)-1，保证续写至少 1 个 token
+    k = min(k, max(0, len(all_ids) - 1))
     prefix_ids = all_ids[:k]
     suffix_ids = all_ids[k:]
     prefix_str = tokenizer.decode(prefix_ids, skip_special_tokens=False)
     suffix_str = tokenizer.decode(suffix_ids, skip_special_tokens=False)
-    
-    
-    if len(ids) == 0:
-        first_k_tokens_len = 0
-    new_prompt = item["messages"][0]["content"]+bad_msg[:first_k_tokens_len]
-    new_bad_msg = bad_msg[first_k_tokens_len:]
+
     bad_ans.append({
         "messages": [
             {
                 "role": "user",
-                "content": item["messages"][0]["content"]
+                "content": user_msg
             },
             {
                 "role": "prefix",
-                "content": bad_msg[:first_k_tokens_len]
+                "content": prefix_str
             },
             {
                 "role": "assistant",
-                "content": new_bad_msg
+                "content": suffix_str
             }
         ]
     })
@@ -74,11 +69,11 @@ for i, item in enumerate(bad_data):
         "messages": [
             {
                 "role": "user",
-                "content": item["messages"][0]["content"]
+                "content": user_msg
             },
             {
                 "role": "prefix",
-                "content": bad_msg[:first_k_tokens_len]
+                "content": prefix_str
             },
             {
                 "role": "assistant",

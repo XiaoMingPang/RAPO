@@ -11,6 +11,30 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 UTILITY_INTERVAL = 1
 _GLOBAL_UTILITY_STEP = 0
 
+# [RAPO-FIX1] 诊断开关：由 train.py --penalty_debug 打开
+PENALTY_DEBUG = False
+_PENALTY_DEBUG_STEP = 0
+
+def _maybe_log_risk_gap(preferred_penalties, rejected_penalties):
+    """每 20 步打印 risk_gap 统计，验证惩罚信号是否有效（risk_gap 应显著 >0）。"""
+    global _PENALTY_DEBUG_STEP
+    if not PENALTY_DEBUG:
+        return
+    _PENALTY_DEBUG_STEP += 1
+    if _PENALTY_DEBUG_STEP % 20 != 0:
+        return
+    with torch.no_grad():
+        preferred_risk = -preferred_penalties
+        rejected_risk = -rejected_penalties
+        risk_gap = (rejected_risk - preferred_risk).clamp(min=0.0, max=1.0)
+        print(
+            f"[PENALTY-DEBUG] step={_PENALTY_DEBUG_STEP} "
+            f"pref_pen={preferred_penalties.mean().item():+.4f} "
+            f"rej_pen={rejected_penalties.mean().item():+.4f} "
+            f"risk_gap_mean={risk_gap.mean().item():.4f} "
+            f"risk_gap_zero={(risk_gap == 0).float().mean().item() * 100:.1f}%"
+        )
+
 def should_compute_utility():
     global _GLOBAL_UTILITY_STEP
     _GLOBAL_UTILITY_STEP += 1
@@ -23,7 +47,11 @@ class PenaltyDistillationModel:
         model_path,
         device="cuda:0",
         max_length=512,
+        score_temperature=1.0,
     ):
+        # [RAPO-FIX-Q2] score_temperature > 1 时 sigmoid 分数不饱和，
+        # risk_gap 随样本变化，保住「动态风险边际」的多样性（默认 1.0 不改变行为）
+        self.score_temperature = float(score_temperature)
         self.penalty_tokenizer = (
             AutoTokenizer.from_pretrained(model_path)
         )
@@ -81,17 +109,21 @@ class PenaltyDistillationModel:
             padding=True,
         ).to(self.device)
 
-        raw_penalties = (
+        raw_logits = (
             self.penalty_model(**inputs)
             .logits
             .squeeze(-1)
             .float()
         )
 
-        penalties = raw_penalties.clamp(
-            min=-1.0,
-            max=0.0,
-        )
+        # [RAPO-FIX1+2] 惩罚模型改为「直接分类器」（BCEWithLogits 训练，输出无界 logit），
+        # 这里用 -sigmoid 映射到 (-1, 0)：
+        #   安全(拒绝续写) -> logit 负 -> penalty≈0  -> risk≈0
+        #   有害(有害续写) -> logit 正 -> penalty≈-1 -> risk≈1
+        # 相比旧的 clamp(-1,0)（把弱回归信号压平），sigmoid 映射更稳、更可区分。
+        # [RAPO-FIX-Q2] 除以 score_temperature（>1 时分数不饱和，risk_gap 更分散，
+        # 使 margin 保持样本级动态性）
+        penalties = -torch.sigmoid(raw_logits / self.score_temperature)
 
         if penalties.ndim == 0:
             penalties = penalties.unsqueeze(0)
@@ -504,6 +536,25 @@ def wgdnpo_loss(main_model, ref_model, dpo_model, inputs, beta=0.5, retain_loss=
     return final_loss
 
 # ======================== RAPO-DPO Loss (Type14) ========================
+def _format_penalty_texts(
+    users: List[str],
+    responses: List[str],
+) -> List[str]:
+    # [RAPO-FIX2] 惩罚模型打分时带上问题上下文。
+    # 格式必须与 utils/train_prefill_classifier.py 训练数据的格式完全一致，
+    # 否则分布漂移会导致 risk_gap 失真。
+    return [
+        f"Question: {u}\nResponse: {r}"
+        for u, r in zip(users, responses)
+    ]
+
+def _get_batch_users(inputs, key, batch_size):
+    # 兼容旧数据（无 user 字段时回退为空字符串）
+    users = inputs.get(key, None)
+    if users is None:
+        users = [""] * batch_size
+    return list(users)
+
 def penalty_based_dpo_loss(
     main_model,
     ref_model,
@@ -563,16 +614,22 @@ def penalty_based_dpo_loss(
             "must be equal."
         )
 
-    preferred_texts = decode_rapo_responses(
-        preferred_input_ids_cpu,
-        preferred_labels_cpu,
-        tokenizer,
+    preferred_texts = _format_penalty_texts(
+        _get_batch_users(inputs, "dpo_preferred_user", batch_size),
+        decode_rapo_responses(
+            preferred_input_ids_cpu,
+            preferred_labels_cpu,
+            tokenizer,
+        ),
     )
 
-    rejected_texts = decode_rapo_responses(
-        rejected_input_ids_cpu,
-        rejected_labels_cpu,
-        tokenizer,
+    rejected_texts = _format_penalty_texts(
+        _get_batch_users(inputs, "dpo_non_preferred_user", batch_size),
+        decode_rapo_responses(
+            rejected_input_ids_cpu,
+            rejected_labels_cpu,
+            tokenizer,
+        ),
     )
 
     all_penalties = (
@@ -601,6 +658,8 @@ def penalty_based_dpo_loss(
     rejected_penalties = (
         all_penalties[batch_size:]
     )
+
+    _maybe_log_risk_gap(preferred_penalties, rejected_penalties)
 
     preferred_risk = -preferred_penalties
     rejected_risk = -rejected_penalties
@@ -892,16 +951,22 @@ def penalty_based_door_loss(
             "must be equal."
         )
 
-    preferred_texts = decode_rapo_responses(
-        preferred_input_ids_cpu,
-        preferred_labels_cpu,
-        tokenizer,
+    preferred_texts = _format_penalty_texts(
+        _get_batch_users(inputs, "dpo_preferred_user", batch_size),
+        decode_rapo_responses(
+            preferred_input_ids_cpu,
+            preferred_labels_cpu,
+            tokenizer,
+        ),
     )
 
-    rejected_texts = decode_rapo_responses(
-        rejected_input_ids_cpu,
-        rejected_labels_cpu,
-        tokenizer,
+    rejected_texts = _format_penalty_texts(
+        _get_batch_users(inputs, "dpo_non_preferred_user", batch_size),
+        decode_rapo_responses(
+            rejected_input_ids_cpu,
+            rejected_labels_cpu,
+            tokenizer,
+        ),
     )
 
     all_penalties = (
@@ -940,6 +1005,8 @@ def penalty_based_door_loss(
             max=0.0,
         )
     )
+
+    _maybe_log_risk_gap(preferred_penalties, rejected_penalties)
 
     preferred_risk = (
         -preferred_penalties
@@ -1239,16 +1306,22 @@ def penalty_based_wdoor_loss(
             "must be equal."
         )
 
-    preferred_texts = decode_rapo_responses(
-        preferred_input_ids_cpu,
-        preferred_labels_cpu,
-        tokenizer,
+    preferred_texts = _format_penalty_texts(
+        _get_batch_users(inputs, "dpo_preferred_user", batch_size),
+        decode_rapo_responses(
+            preferred_input_ids_cpu,
+            preferred_labels_cpu,
+            tokenizer,
+        ),
     )
 
-    rejected_texts = decode_rapo_responses(
-        rejected_input_ids_cpu,
-        rejected_labels_cpu,
-        tokenizer,
+    rejected_texts = _format_penalty_texts(
+        _get_batch_users(inputs, "dpo_non_preferred_user", batch_size),
+        decode_rapo_responses(
+            rejected_input_ids_cpu,
+            rejected_labels_cpu,
+            tokenizer,
+        ),
     )
 
     all_penalties = (
@@ -1287,6 +1360,8 @@ def penalty_based_wdoor_loss(
             max=0.0,
         )
     )
+
+    _maybe_log_risk_gap(preferred_penalties, rejected_penalties)
 
     preferred_risk = (
         -preferred_penalties

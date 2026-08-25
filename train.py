@@ -42,9 +42,20 @@ parser.add_argument('--penalty_max_length', type=int, default=512,
                     help="PenaltyDistillationModel 的最大序列长度")
 parser.add_argument('--penalty_device', type=str, default="cuda:0",
                     help="PenaltyDistillationModel 所在设备")
+# [RAPO-FIX1] 诊断开关：打开后 RAPO 训练每 20 步打印 risk_gap 均值/零值比例
+parser.add_argument('--penalty_debug', action='store_true', default=False,
+                    help="打印 RAPO penalty risk_gap 诊断统计（用于验证惩罚信号是否生效）")
+# [RAPO-FIX-Q2] 惩罚打分温度：>1 时 risk_gap 更分散，margin 保持样本级动态性（默认 1.0）
+parser.add_argument('--score_temperature', type=float, default=1.0,
+                    help="惩罚模型 sigmoid 温度缩放（>1 增强动态性，减弱最大 margin）")
 
 
 args = parser.parse_args()
+
+# [RAPO-FIX1] 打开 loss.py 中的风险诊断日志
+if args.penalty_debug:
+    import utils.loss as _loss_mod
+    _loss_mod.PENALTY_DEBUG = True
 
 # ======================== 1. 加载规则惩罚模型（仅 RAPO 类型） ========================
 penalty_model = None
@@ -54,9 +65,11 @@ if args.type in [14, 15, 16]:
             model_path=args.rule_model_path,
             device=args.penalty_device,
             max_length=args.penalty_max_length,
+            score_temperature=args.score_temperature,
         )
         print(f"✅ 成功加载规则惩罚模型: {args.rule_model_path} "
-              f"(device={args.penalty_device}, max_length={args.penalty_max_length})")
+              f"(device={args.penalty_device}, max_length={args.penalty_max_length}, "
+              f"score_temperature={args.score_temperature})")
     except Exception as e:
         raise RuntimeError(f"❌ 规则惩罚模型加载失败: {e}")
 else:
@@ -191,7 +204,8 @@ def data_collator(batch_list):
         if isinstance(batch_list[0][key], torch.Tensor):
             result[key] = torch.stack([item[key] for item in batch_list])
         else:
-            raise ValueError(f"Unsupported type for key {key}: {type(batch_list[0][key])}")
+            # [RAPO-FIX2] 支持字符串（user 文本）透传，供惩罚模型带问题上下文打分
+            result[key] = [item[key] for item in batch_list]
     return result
 
 # ======================== 7. 训练参数配置 ========================

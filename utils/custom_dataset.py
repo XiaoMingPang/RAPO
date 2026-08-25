@@ -59,26 +59,39 @@ class CustomDataset(Dataset):
             prefix = self.prefix[key]
 
             if prefix:
+                # ============================================================
+                # [RAPO-FIX1] 前缀进 prompt、label 只含续写
+                #   - 与 gen_response.py 的 prefill 推理严格对齐（推理时前缀是
+                #     外部强制追加在 prompt 之后，模型只续写）。
+                #   - 好处1：decode_rapo_responses 给惩罚模型喂的文本不再含
+                #     有害前缀，规则命中不会集中在攻击者前缀上，risk_gap 不再
+                #     被压成 0。
+                #   - 好处2：DPO/DOOR 训练时 good/bad 共享同一 prompt（同一
+                #     前缀），log-ratio 只反映续写差异，语义更干净。
+                # ============================================================
                 if self.sys_role:
                     chat = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": ann["user"]}]
                 else:
                     chat = [{"role": "user", "content": ann["user"]}]
 
-                #chat.append({"role": "assistant", "content": ann["prefix"]})
-                prompt = self.tokenizer.apply_chat_template(chat,tokenize=True,add_generation_prompt=True)
-                chat.append({"role": "assistant", "content": ann["prefix"]+ann["assistant"]})
-                example = self.tokenizer.apply_chat_template(chat,tokenize=True)
-                t_len = 0
-                min_len = min(len(prompt), len(example))
-                while t_len < min_len and prompt[t_len] == example[t_len]:
-                    t_len += 1
-                prompt_len = t_len
-                # print(self.tokenizer.eos_token_id)
-                # print("prompt,example:\n", prompt, "\n", prompt[:prompt_len], "\n", example)
-                # print("prompt:", self.tokenizer.decode(prompt[:prompt_len]))
-                # print("example:", self.tokenizer.decode(example))
-                prompt = torch.tensor(prompt[:prompt_len], dtype=torch.int64)
-                example = torch.tensor(example, dtype=torch.int64)
+                # 用户 prompt + assistant 起始标记（与推理时一致）
+                prompt = self.tokenizer.apply_chat_template(
+                    chat, tokenize=True, add_generation_prompt=True)
+                # 攻击者强制前缀：token 级追加到 prompt。
+                # （prefix-bad 数据本为 prefix_ids + suffix_ids 的 round-trip，
+                #  token 级拼接可避免字符串再切分的跨 token 边界问题）
+                prefix_ids = self.tokenizer(
+                    ann["prefix"], add_special_tokens=False)["input_ids"]
+                prompt_ids = prompt + prefix_ids
+                # 续写作为唯一 label 区域（label 只含续写，惩罚模型天然看不到前缀）
+                cont_ids = self.tokenizer(
+                    ann["assistant"], add_special_tokens=False)["input_ids"]
+                eos_id = self.tokenizer.eos_token_id
+                example_ids = prompt_ids + cont_ids + (
+                    [eos_id] if eos_id is not None else [])
+
+                prompt = torch.tensor(prompt_ids, dtype=torch.int64)
+                example = torch.tensor(example_ids, dtype=torch.int64)
             else:
                 if self.sys_role:
                     chat = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": ann["user"]}]
@@ -114,6 +127,8 @@ class CustomDataset(Dataset):
                     f"{key}input_ids": example,
                     f"{key}labels": labels,
                     f"{key}attention_mask": example_mask,
+                    # [RAPO-FIX2] 导出原始 user 文本，供惩罚模型打分时带上问题上下文
+                    f"{key}user": ann["user"],
                 }
             )
 
