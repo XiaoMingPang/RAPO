@@ -17,7 +17,7 @@ import re
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 if not DEEPSEEK_API_KEY:
-    print("ÇëÉèÖÃ»·¾³±äÁ¿ DEEPSEEK_API_KEY", file=sys.stderr)
+    print("è¯·è®¾ç½®ç¯å¢ƒå˜é‡ DEEPSEEK_API_KEY", file=sys.stderr)
     sys.exit(1)
 
 deepseek_client = AsyncOpenAI(
@@ -59,7 +59,7 @@ client = deepseek_client
 
 
 def _extract_content(response):
-    """Í³Ò»´Ó response ÖĞÌáÈ¡ÎÄ±¾£¬Ê§°Ü/Òì³£·µ»Ø 'No'¡£"""
+    """ç»Ÿä¸€ä» response ä¸­æå–æ–‡æœ¬ï¼Œå¤±è´¥/å¼‚å¸¸è¿”å› 'No'ã€‚"""
     if isinstance(response, Exception):
         return "No"
     choices = getattr(response, "choices", None)
@@ -356,7 +356,7 @@ def main():
     parser.add_argument("--model_path", type=str, help="Path of target model (for KL).")
     parser.add_argument("--bad_model_path", type=str, help="Path of base model (for KL).")
     parser.add_argument("--ks", type=int, nargs='*',
-                        default=[3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 20],
+                        default=[3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 20, 23, 25],
                         help="Token counts for KL.")
     parser.add_argument("--batch_size", type=int, default=10, help="Batch size for OpenAI calls.")
     args = parser.parse_args()
